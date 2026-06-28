@@ -23,16 +23,18 @@ VALID_ROUTE_REQUEST = {
     "avoidMotorways": False,
 }
 
+VALHALLA_POLYLINE6 = "o~kffBnztwHokiSnkiS"
 
 VALHALLA_RESPONSE = {
     "trip": {
+        "status": 0,
         "summary": {
             "length": 10,
             "time": 1200,
         },
         "legs": [
             {
-                "shape": "encoded-leg-shape",
+                "shape": VALHALLA_POLYLINE6,
                 "summary": {
                     "length": 10,
                     "time": 1200,
@@ -43,6 +45,11 @@ VALHALLA_RESPONSE = {
                         "instruction": "Drive north.",
                         "time": 60,
                         "length": 0.5,
+                        "type": 1,
+                        "begin_heading": 15,
+                        "begin_shape_index": 0,
+                        "end_shape_index": 1,
+                        "street_names": ["Main Street"],
                     }
                 ],
             }
@@ -253,6 +260,30 @@ def test_malformed_valhalla_response_returns_502(client, monkeypatch):
     assert response.json()["code"] == "INVALID_VALHALLA_RESPONSE"
 
 
+def test_valhalla_response_without_decodable_shape_returns_502(client, monkeypatch):
+    def post(url, json, timeout):
+        return MockValhallaResponse(
+            payload={
+                "trip": {
+                    "status": 0,
+                    "summary": {"length": 10, "time": 1200},
+                    "legs": [{"summary": {"length": 10, "time": 1200}}],
+                }
+            }
+        )
+
+    monkeypatch.setattr("routing.valhalla.requests.post", post)
+
+    response = client.post(
+        "/routes/calculate",
+        data=VALID_ROUTE_REQUEST,
+        content_type="application/json",
+    )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "INVALID_VALHALLA_RESPONSE"
+
+
 def test_successful_response_returns_normalized_route(client, mock_valhalla_post):
     response = client.post(
         "/routes/calculate",
@@ -262,7 +293,11 @@ def test_successful_response_returns_normalized_route(client, mock_valhalla_post
 
     assert response.status_code == 200
     assert response.json() == {
-        "encodedPolyline": "encoded-leg-shape",
+        "encodedPolyline": VALHALLA_POLYLINE6,
+        "polyline": [
+            [-5.123, 54.123],
+            [-5.456, 54.456],
+        ],
         "distanceMetres": 16093,
         "durationSeconds": 1200,
         "legs": [
@@ -273,8 +308,12 @@ def test_successful_response_returns_normalized_route(client, mock_valhalla_post
                 "maneuvers": [
                     {
                         "instruction": "Drive north.",
-                        "time": 60,
-                        "length": 0.5,
+                        "distanceMetres": 805,
+                        "type": "1",
+                        "bearing_after": 15,
+                        "beginShapeIndex": 0,
+                        "endShapeIndex": 1,
+                        "streetNames": ["Main Street"],
                     }
                 ],
             }
@@ -284,3 +323,34 @@ def test_successful_response_returns_normalized_route(client, mock_valhalla_post
         "generatedAt": response.json()["generatedAt"],
     }
     assert response.json()["generatedAt"]
+
+
+def test_successful_response_contains_app_route_result_fields(
+    client,
+    mock_valhalla_post,
+):
+    response = client.post(
+        "/routes/calculate",
+        data=VALID_ROUTE_REQUEST,
+        content_type="application/json",
+    )
+
+    body = response.json()
+
+    assert isinstance(body["polyline"], list)
+    assert len(body["polyline"]) >= 2
+    assert all(len(coordinate) == 2 for coordinate in body["polyline"])
+    assert isinstance(body["distanceMetres"], int)
+    assert isinstance(body["durationSeconds"], int)
+    assert isinstance(body["legs"], list)
+    assert body["legs"][0]["maneuvers"] == [
+        {
+            "instruction": "Drive north.",
+            "distanceMetres": 805,
+            "type": "1",
+            "bearing_after": 15,
+            "beginShapeIndex": 0,
+            "endShapeIndex": 1,
+            "streetNames": ["Main Street"],
+        }
+    ]

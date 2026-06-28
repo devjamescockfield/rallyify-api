@@ -96,13 +96,28 @@ Response:
 ```json
 {
   "encodedPolyline": "...",
+  "polyline": [
+    [-5.123, 54.123],
+    [-5.456, 54.456]
+  ],
   "distanceMetres": 12345,
   "durationSeconds": 1234,
   "legs": [
     {
       "distanceMetres": 12345,
       "durationSeconds": 1234,
-      "summary": "Start to Finish"
+      "summary": "Start to Finish",
+      "maneuvers": [
+        {
+          "instruction": "Drive north.",
+          "distanceMetres": 805,
+          "type": "1",
+          "bearing_after": 15,
+          "beginShapeIndex": 0,
+          "endShapeIndex": 1,
+          "streetNames": ["Main Street"]
+        }
+      ]
     }
   ],
   "waypoints": [
@@ -110,12 +125,19 @@ Response:
       "latitude": 54.123,
       "longitude": -5.123,
       "name": "Start"
+    },
+    {
+      "latitude": 54.456,
+      "longitude": -5.456,
+      "name": "Finish"
     }
   ],
   "provider": "valhalla",
   "generatedAt": "2026-06-28T12:00:00+00:00"
 }
 ```
+
+The `polyline` field is a decoded array of `[longitude, latitude]` pairs for the current Rallyify mobile app `RouteResult` contract. `encodedPolyline` is retained as the raw Valhalla shape where available for diagnostics or future clients. The API does not return `bounds`; the app currently derives bounds from `polyline`.
 
 ## Planned Next Step
 

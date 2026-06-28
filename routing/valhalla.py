@@ -97,10 +97,15 @@ def normalize_valhalla_response(
     if not isinstance(legs, list) or not legs:
         raise InvalidValhallaResponseError
 
+    if trip.get("status") not in (None, 0):
+        raise InvalidValhallaResponseError
+
     encoded_polyline = trip.get("shape") or legs[0].get("shape") or ""
+    polyline = _decode_route_polyline(trip, legs)
 
     return {
         "encodedPolyline": encoded_polyline,
+        "polyline": polyline,
         "distanceMetres": _length_to_metres(
             summary["length"],
             original_request["units"],
@@ -160,11 +165,96 @@ def _normalize_leg(leg: dict, units: str) -> dict:
     if summary.get("text"):
         normalized["summary"] = summary["text"]
 
-    maneuvers = leg.get("maneuvers")
-    if isinstance(maneuvers, list):
-        normalized["maneuvers"] = maneuvers
+    maneuvers = leg.get("maneuvers", [])
+    normalized["maneuvers"] = [
+        _normalize_maneuver(maneuver, units)
+        for maneuver in maneuvers
+        if isinstance(maneuver, dict)
+    ]
 
     return normalized
+
+
+def _normalize_maneuver(maneuver: dict, units: str) -> dict:
+    normalized = {
+        "instruction": str(maneuver.get("instruction", "")),
+        "distanceMetres": _length_to_metres(maneuver.get("length", 0), units),
+        "type": str(maneuver.get("type", "")),
+        "bearing_after": round(float(maneuver.get("begin_heading", 0))),
+    }
+
+    if "begin_shape_index" in maneuver:
+        normalized["beginShapeIndex"] = maneuver["begin_shape_index"]
+    if "end_shape_index" in maneuver:
+        normalized["endShapeIndex"] = maneuver["end_shape_index"]
+    if "street_names" in maneuver:
+        normalized["streetNames"] = maneuver["street_names"]
+
+    return normalized
+
+
+def _decode_route_polyline(trip: dict, legs: list[dict]) -> list[list[float]]:
+    if trip.get("shape"):
+        return _decode_polyline6(trip["shape"])
+
+    coordinates = []
+    for leg in legs:
+        shape = leg.get("shape")
+        if not shape:
+            continue
+        decoded_leg = _decode_polyline6(shape)
+        if coordinates and decoded_leg and coordinates[-1] == decoded_leg[0]:
+            coordinates.extend(decoded_leg[1:])
+        else:
+            coordinates.extend(decoded_leg)
+
+    if len(coordinates) < 2:
+        raise InvalidValhallaResponseError
+
+    return coordinates
+
+
+def _decode_polyline6(encoded: str) -> list[list[float]]:
+    if not isinstance(encoded, str) or not encoded:
+        raise InvalidValhallaResponseError
+
+    coordinates = []
+    index = 0
+    latitude = 0
+    longitude = 0
+
+    try:
+        while index < len(encoded):
+            latitude_delta, index = _decode_polyline_value(encoded, index)
+            longitude_delta, index = _decode_polyline_value(encoded, index)
+            latitude += latitude_delta
+            longitude += longitude_delta
+            coordinates.append([longitude / 1_000_000, latitude / 1_000_000])
+    except (IndexError, ValueError) as exc:
+        raise InvalidValhallaResponseError from exc
+
+    if len(coordinates) < 2:
+        raise InvalidValhallaResponseError
+
+    return coordinates
+
+
+def _decode_polyline_value(encoded: str, index: int) -> tuple[int, int]:
+    result = 0
+    shift = 0
+
+    while True:
+        byte = ord(encoded[index]) - 63
+        index += 1
+        result |= (byte & 0x1F) << shift
+        shift += 5
+        if byte < 0x20:
+            break
+        if shift > 60:
+            raise ValueError("Invalid polyline encoding")
+
+    value = ~(result >> 1) if result & 1 else result >> 1
+    return value, index
 
 
 def _length_to_metres(length: int | float, units: str) -> int:
