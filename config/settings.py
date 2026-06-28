@@ -80,3 +80,4 @@ REST_FRAMEWORK = {
 }
 
 VALHALLA_URL = os.getenv("VALHALLA_URL", "http://localhost:8002")
+VALHALLA_TIMEOUT_SECONDS = float(os.getenv("VALHALLA_TIMEOUT_SECONDS", "10"))

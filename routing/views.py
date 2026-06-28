@@ -2,7 +2,13 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from routing.valhalla import get_valhalla_status
+from routing.serializers import RouteCalculationSerializer
+from routing.valhalla import (
+    InvalidValhallaResponseError,
+    ValhallaUnavailableError,
+    calculate_route as calculate_valhalla_route,
+    get_valhalla_status,
+)
 
 
 @api_view(["GET"])
@@ -18,10 +24,35 @@ def health(request):
 
 @api_view(["POST"])
 def calculate_route(request):
-    return Response(
-        {
-            "error": "Route calculation is not implemented yet.",
-            "code": "NOT_IMPLEMENTED",
-        },
-        status=status.HTTP_501_NOT_IMPLEMENTED,
-    )
+    serializer = RouteCalculationSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        route = calculate_valhalla_route(serializer.validated_data)
+    except ValhallaUnavailableError:
+        return Response(
+            {
+                "error": "Valhalla is unavailable.",
+                "code": "VALHALLA_UNAVAILABLE",
+            },
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+    except InvalidValhallaResponseError:
+        return Response(
+            {
+                "error": "Valhalla returned an invalid response.",
+                "code": "INVALID_VALHALLA_RESPONSE",
+            },
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+    except Exception:
+        return Response(
+            {
+                "error": "An unexpected error occurred.",
+                "code": "INTERNAL_ERROR",
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    return Response(route)

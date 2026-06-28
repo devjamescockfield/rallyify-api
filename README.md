@@ -45,6 +45,7 @@ The `docker-compose.yml` file includes a commented Valhalla service placeholder.
 | `SECRET_KEY` | Dev fallback | Django secret key. Set a real value outside local development. |
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1,0.0.0.0` | Comma-separated Django allowed hosts. |
 | `VALHALLA_URL` | `http://localhost:8002` | Base URL for the Valhalla service. |
+| `VALHALLA_TIMEOUT_SECONDS` | `10` | Outbound Valhalla request timeout. |
 
 ## Endpoints
 
@@ -65,15 +66,57 @@ Returns service health without failing when Valhalla is unavailable.
 
 ### `POST /routes/calculate`
 
-Route calculation is scaffolded but not implemented yet.
+Validates a Rallyify route request, forwards it to Valhalla's `/route` API, and returns a normalized response.
+
+Request:
 
 ```json
 {
-  "error": "Route calculation is not implemented yet.",
-  "code": "NOT_IMPLEMENTED"
+  "waypoints": [
+    {
+      "latitude": 54.123,
+      "longitude": -5.123,
+      "name": "Start"
+    },
+    {
+      "latitude": 54.456,
+      "longitude": -5.456,
+      "name": "Finish"
+    }
+  ],
+  "vehicleProfile": "car",
+  "roadPriority": "balanced",
+  "units": "imperial",
+  "avoidMotorways": false
+}
+```
+
+Response:
+
+```json
+{
+  "encodedPolyline": "...",
+  "distanceMetres": 12345,
+  "durationSeconds": 1234,
+  "legs": [
+    {
+      "distanceMetres": 12345,
+      "durationSeconds": 1234,
+      "summary": "Start to Finish"
+    }
+  ],
+  "waypoints": [
+    {
+      "latitude": 54.123,
+      "longitude": -5.123,
+      "name": "Start"
+    }
+  ],
+  "provider": "valhalla",
+  "generatedAt": "2026-06-28T12:00:00+00:00"
 }
 ```
 
 ## Planned Next Step
 
-Implement `POST /routes/calculate` by validating route requests and forwarding them to the configured Valhalla adapter in `routing/valhalla.py`.
+Run the endpoint against a live local Valhalla instance and refine the route options once Rallyify's first route preferences are tested on real map data.
