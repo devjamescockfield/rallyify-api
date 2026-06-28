@@ -1,0 +1,24 @@
+services:
+  rallyify-api:
+    build: .
+    container_name: rallyify-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DEBUG: "true"
+      VALHALLA_URL: "http://valhalla:8002"
+    volumes:
+      - .:/app
+
+  # Valhalla placeholder for a later task.
+  # This project will call a self-hosted Valhalla service, but tile building
+  # and service configuration are intentionally out of scope for this bootstrap.
+  #
+  # valhalla:
+  #   image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+  #   ports:
+  #     - "8002:8002"
+  #   volumes:
+  #     - ./valhalla:/custom_files
