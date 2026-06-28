@@ -1,0 +1,17 @@
+asgiref==3.11.1
+certifi==2026.6.17
+charset-normalizer==3.4.7
+Django==5.2.15
+djangorestframework==3.17.1
+idna==3.18
+iniconfig==2.3.0
+packaging==26.2
+pluggy==1.6.0
+Pygments==2.20.0
+pytest==9.1.1
+pytest-django==4.12.0
+python-dotenv==1.2.2
+requests==2.34.2
+ruff==0.15.20
+sqlparse==0.5.5
+urllib3==2.7.0
