@@ -138,13 +138,19 @@ def _build_costing_options(
 ) -> dict:
     options = {}
 
-    # Valhalla's use_highways value ranges from 0 to 1. Lower values make
-    # motorway/highway routing less attractive without banning roads outright.
+    # First-pass Rallyify preference mappings. Valhalla's use_highways value
+    # ranges from 0 to 1; lower values make motorway/highway routing less
+    # attractive without banning roads outright. These conservative values
+    # should be refined after testing against a live Valhalla instance and real
+    # Rallyify route examples.
     use_highways = None
-    if road_priority == "scenic":
-        use_highways = 0.25
-    elif avoid_motorways:
+
+    if avoid_motorways or road_priority == "avoid_motorways":
         use_highways = 0.05
+    elif road_priority == "scenic":
+        use_highways = 0.25
+    elif road_priority == "prefer_b_roads":
+        use_highways = 0.35
 
     if use_highways is not None:
         options[costing] = {"use_highways": use_highways}

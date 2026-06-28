@@ -10,7 +10,15 @@ class WaypointSerializer(serializers.Serializer):
 class RouteCalculationSerializer(serializers.Serializer):
     waypoints = WaypointSerializer(many=True, min_length=2)
     vehicleProfile = serializers.ChoiceField(choices=["car", "motorbike", "caravan"])
-    roadPriority = serializers.ChoiceField(choices=["fastest", "balanced", "scenic"])
+    roadPriority = serializers.ChoiceField(
+        choices=[
+            "fastest",
+            "balanced",
+            "scenic",
+            "avoid_motorways",
+            "prefer_b_roads",
+        ]
+    )
     units = serializers.ChoiceField(choices=["metric", "imperial"])
     avoidMotorways = serializers.BooleanField(default=False)
 

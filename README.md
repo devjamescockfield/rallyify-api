@@ -91,6 +91,21 @@ Request:
 }
 ```
 
+`roadPriority` accepts `fastest`, `balanced`, `scenic`, `avoid_motorways`, and `prefer_b_roads`. The separate `avoidMotorways` boolean is still supported as an explicit override.
+
+Current first-pass Valhalla preference mapping:
+
+| Rallyify setting | Valhalla costing options |
+| --- | --- |
+| `fastest` | default options |
+| `balanced` | default options |
+| `scenic` | `use_highways: 0.25` |
+| `avoid_motorways` | `use_highways: 0.05` |
+| `prefer_b_roads` | `use_highways: 0.35` |
+| `avoidMotorways: true` | forces `use_highways: 0.05` |
+
+These route preference values are intentionally conservative until they can be refined against a live Valhalla instance and real Rallyify route examples.
+
 Response:
 
 ```json

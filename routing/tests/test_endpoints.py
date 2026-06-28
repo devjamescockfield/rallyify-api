@@ -172,6 +172,53 @@ def test_scenic_changes_costing_options_compared_with_fastest_and_balanced():
     assert scenic_payload["costing_options"]["auto"]["use_highways"] == 0.25
 
 
+@pytest.mark.parametrize("road_priority", ["avoid_motorways", "prefer_b_roads"])
+def test_app_road_priority_values_are_accepted(client, mock_valhalla_post, road_priority):
+    response = client.post(
+        "/routes/calculate",
+        data=VALID_ROUTE_REQUEST | {"roadPriority": road_priority},
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+
+
+def test_avoid_motorways_priority_reduces_highways_more_than_balanced():
+    balanced_payload = build_valhalla_payload(
+        VALID_ROUTE_REQUEST | {"roadPriority": "balanced"}
+    )
+    avoid_motorways_payload = build_valhalla_payload(
+        VALID_ROUTE_REQUEST | {"roadPriority": "avoid_motorways"}
+    )
+
+    assert balanced_payload["costing_options"] == {}
+    assert avoid_motorways_payload["costing_options"]["auto"]["use_highways"] == 0.05
+
+
+def test_prefer_b_roads_changes_costing_options_compared_with_balanced():
+    balanced_payload = build_valhalla_payload(
+        VALID_ROUTE_REQUEST | {"roadPriority": "balanced"}
+    )
+    prefer_b_roads_payload = build_valhalla_payload(
+        VALID_ROUTE_REQUEST | {"roadPriority": "prefer_b_roads"}
+    )
+
+    assert prefer_b_roads_payload["costing_options"] != balanced_payload["costing_options"]
+    assert prefer_b_roads_payload["costing_options"]["auto"]["use_highways"] == 0.35
+
+
+@pytest.mark.parametrize("road_priority", ["fastest", "balanced"])
+def test_avoid_motorways_boolean_overrides_fastest_and_balanced(road_priority):
+    payload = build_valhalla_payload(
+        VALID_ROUTE_REQUEST | {
+            "roadPriority": road_priority,
+            "avoidMotorways": True,
+        }
+    )
+
+    assert payload["costing_options"]["auto"]["use_highways"] == 0.05
+
+
 def test_invalid_waypoint_count_returns_400(client):
     response = client.post(
         "/routes/calculate",
@@ -206,6 +253,16 @@ def test_invalid_vehicle_profile_returns_400(client):
     response = client.post(
         "/routes/calculate",
         data=VALID_ROUTE_REQUEST | {"vehicleProfile": "bicycle"},
+        content_type="application/json",
+    )
+
+    assert response.status_code == 400
+
+
+def test_invalid_road_priority_returns_400(client):
+    response = client.post(
+        "/routes/calculate",
+        data=VALID_ROUTE_REQUEST | {"roadPriority": "twisty"},
         content_type="application/json",
     )
 
