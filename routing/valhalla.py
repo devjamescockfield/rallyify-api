@@ -4,11 +4,48 @@ from django.conf import settings
 import requests
 
 
-def get_valhalla_status() -> dict[str, bool]:
-    return {
+def get_valhalla_status() -> dict[str, object]:
+    status = {
         "configured": bool(settings.VALHALLA_URL),
         "reachable": False,
     }
+
+    if not settings.VALHALLA_URL:
+        return status
+
+    try:
+        response = requests.get(
+            f"{settings.VALHALLA_URL.rstrip('/')}/status",
+            timeout=settings.VALHALLA_HEALTH_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException:
+        return status
+
+    status["reachable"] = response.ok
+    if not response.ok:
+        return status
+
+    version = _extract_valhalla_version(response)
+    if version:
+        status["version"] = version
+
+    return status
+
+
+def _extract_valhalla_version(response: requests.Response) -> str | None:
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    version = payload.get("version") or payload.get("valhalla_version")
+    if version is None:
+        return None
+
+    return str(version)
 
 
 class ValhallaUnavailableError(Exception):

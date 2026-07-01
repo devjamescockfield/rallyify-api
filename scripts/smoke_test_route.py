@@ -91,14 +91,21 @@ def main() -> int:
         action="store_true",
         help="Set avoidMotorways=true in the route request.",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print full raw JSON responses.",
+    )
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
     print(f"Rallyify API: {base_url}")
 
     health_status, health_body = get_json(f"{base_url}/health")
-    print(f"GET /health -> {health_status}")
-    print(json.dumps(health_body, indent=2))
+    print_health_summary(health_status, health_body)
+    if args.json:
+        print("Health JSON:")
+        print(json.dumps(health_body, indent=2))
 
     route_request = {
         "waypoints": ROUTES[args.route],
@@ -112,8 +119,11 @@ def main() -> int:
         f"{base_url}/routes/calculate",
         route_request,
     )
-    print(f"POST /routes/calculate ({args.route}) -> {route_status}")
-    print(json.dumps(route_body, indent=2))
+    print_route_header(args.route, route_status)
+
+    if args.json:
+        print("Route JSON:")
+        print(json.dumps(route_body, indent=2))
 
     if route_status == 200:
         print_success_summary(route_body)
@@ -167,17 +177,91 @@ def parse_json(body: str) -> object:
         return {"raw": body}
 
 
+def print_health_summary(status: int, health_body: object) -> None:
+    print(f"GET /health -> {status}")
+
+    if not isinstance(health_body, dict):
+        return
+
+    valhalla = health_body.get("valhalla")
+    if not isinstance(valhalla, dict):
+        return
+
+    reachable = valhalla.get("reachable")
+    version = valhalla.get("version")
+    summary = f"Valhalla reachable: {reachable}"
+    if version:
+        summary = f"{summary} (version {version})"
+    print(summary)
+
+
+def print_route_header(route_key: str, status: int) -> None:
+    print(f"Route: {format_route_name(route_key)}")
+    print(f"POST /routes/calculate -> {status}")
+
+
 def print_success_summary(route_body: object) -> None:
     if not isinstance(route_body, dict):
         return
 
+    distance_metres = route_body.get("distanceMetres")
+    duration_seconds = route_body.get("durationSeconds")
     polyline = route_body.get("polyline")
     legs = route_body.get("legs")
     print("Route calculated.")
-    print(f"distanceMetres: {route_body.get('distanceMetres')}")
-    print(f"durationSeconds: {route_body.get('durationSeconds')}")
+    print(f"distance: {format_distance(distance_metres)}")
+    print(f"duration: {format_duration(duration_seconds)}")
     print(f"polyline points: {len(polyline) if isinstance(polyline, list) else 0}")
     print(f"legs: {len(legs) if isinstance(legs, list) else 0}")
+    print(f"first manoeuvre: {first_manoeuvre_instruction(legs)}")
+
+
+def format_route_name(route_key: str) -> str:
+    waypoints = ROUTES[route_key]
+    return " -> ".join(waypoint["name"] for waypoint in waypoints)
+
+
+def format_distance(distance_metres: object) -> str:
+    if not isinstance(distance_metres, int | float):
+        return "unknown"
+
+    miles = distance_metres / 1609.344
+    kilometres = distance_metres / 1000
+    return f"{miles:.1f} mi / {kilometres:.1f} km"
+
+
+def format_duration(duration_seconds: object) -> str:
+    if not isinstance(duration_seconds, int | float):
+        return "unknown"
+
+    total_minutes = round(duration_seconds / 60)
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    if hours and minutes:
+        return f"{hours}h {minutes}m"
+    if hours:
+        return f"{hours}h"
+    return f"{minutes}m"
+
+
+def first_manoeuvre_instruction(legs: object) -> str:
+    if not isinstance(legs, list):
+        return "none"
+
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        maneuvers = leg.get("maneuvers")
+        if not isinstance(maneuvers, list):
+            continue
+        for maneuver in maneuvers:
+            if not isinstance(maneuver, dict):
+                continue
+            instruction = maneuver.get("instruction")
+            if instruction:
+                return str(instruction)
+
+    return "none"
 
 
 if __name__ == "__main__":

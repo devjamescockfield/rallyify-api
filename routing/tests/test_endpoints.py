@@ -1,5 +1,6 @@
 import pytest
 import requests
+from django.test import override_settings
 
 from routing.valhalla import build_valhalla_payload
 
@@ -67,6 +68,15 @@ class MockValhallaResponse:
         return self.payload
 
 
+class MockValhallaStatusResponse:
+    def __init__(self, payload=None, ok=True):
+        self.payload = payload or {}
+        self.ok = ok
+
+    def json(self):
+        return self.payload
+
+
 @pytest.fixture
 def mock_valhalla_post(monkeypatch):
     calls = []
@@ -79,18 +89,54 @@ def mock_valhalla_post(monkeypatch):
     return calls
 
 
-def test_health_returns_200(client):
+def test_health_returns_200_when_valhalla_unavailable(client, monkeypatch):
+    def get(url, timeout):
+        raise requests.Timeout
+
+    monkeypatch.setattr("routing.valhalla.requests.get", get)
+
     response = client.get("/health")
 
     assert response.status_code == 200
+    assert response.json()["valhalla"] == {
+        "configured": True,
+        "reachable": False,
+    }
 
 
-def test_health_includes_service_name(client):
+def test_health_includes_service_name(client, monkeypatch):
+    def get(url, timeout):
+        raise requests.Timeout
+
+    monkeypatch.setattr("routing.valhalla.requests.get", get)
+
     response = client.get("/health")
 
     assert response.json()["service"] == "rallyify-routing-api"
 
 
+@override_settings(VALHALLA_URL="http://localhost:8002")
+def test_health_reports_valhalla_reachable_with_version(client, monkeypatch):
+    calls = []
+
+    def get(url, timeout):
+        calls.append({"url": url, "timeout": timeout})
+        return MockValhallaStatusResponse(payload={"version": "3.5.1"})
+
+    monkeypatch.setattr("routing.valhalla.requests.get", get)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["valhalla"] == {
+        "configured": True,
+        "reachable": True,
+        "version": "3.5.1",
+    }
+    assert calls == [{"url": "http://localhost:8002/status", "timeout": 1.0}]
+
+
+@override_settings(VALHALLA_URL="http://localhost:8002")
 def test_valid_request_calls_valhalla_route(client, mock_valhalla_post):
     response = client.post(
         "/routes/calculate",

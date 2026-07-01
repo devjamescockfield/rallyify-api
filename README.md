@@ -46,6 +46,7 @@ The `docker-compose.yml` file includes a commented Valhalla service placeholder.
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1,0.0.0.0` | Comma-separated Django allowed hosts. |
 | `VALHALLA_URL` | `http://localhost:8002` | Base URL for the Valhalla service. |
 | `VALHALLA_TIMEOUT_SECONDS` | `10` | Outbound Valhalla request timeout. |
+| `VALHALLA_HEALTH_TIMEOUT_SECONDS` | `1` | Short `/health` probe timeout for Valhalla `/status`. |
 | `RALLYIFY_API_BASE_URL` | `http://127.0.0.1:8000` | Base URL used by local smoke-test scripts. |
 
 ## Endpoints
@@ -60,10 +61,13 @@ Returns service health without failing when Valhalla is unavailable.
   "service": "rallyify-routing-api",
   "valhalla": {
     "configured": true,
-    "reachable": false
+    "reachable": true,
+    "version": "3.5.1"
   }
 }
 ```
+
+`version` is included only when Valhalla's `/status` response provides it. `/health` still returns `200` when Valhalla is unavailable; in that case `reachable` is `false`.
 
 ### `POST /routes/calculate`
 
@@ -171,7 +175,13 @@ Run the smoke script from another shell:
 python scripts/smoke_test_route.py
 ```
 
-The script uses `RALLYIFY_API_BASE_URL` or `http://127.0.0.1:8000` by default. It calls `/health`, then `POST /routes/calculate`.
+The script uses `RALLYIFY_API_BASE_URL` or `http://127.0.0.1:8000` by default. It calls `/health`, then `POST /routes/calculate`. By default it prints a compact summary with route name, HTTP status, distance in miles and kilometres, duration, polyline point count, leg count, and the first manoeuvre instruction if present.
+
+Use `--json` to print the full raw JSON responses:
+
+```bash
+python scripts/smoke_test_route.py --route inverness-ullapool --json
+```
 
 ```bash
 RALLYIFY_API_BASE_URL=http://127.0.0.1:8000 python scripts/smoke_test_route.py --route belfast-inverness
