@@ -3,6 +3,7 @@ services:
     image: caddy:2-alpine
     container_name: rallyify-caddy
     restart: unless-stopped
+    # Public edge: Caddy is the only service that should publish host ports.
     ports:
       - "80:80"
       - "443:443"
@@ -17,6 +18,8 @@ services:
     build: .
     container_name: rallyify-api
     restart: unless-stopped
+    # Internal-only: Caddy reaches the API at http://rallyify-api:8000.
+    # Do not add a ports: mapping here for staging.
     expose:
       - "8000"
     env_file:
@@ -32,13 +35,16 @@ services:
       - valhalla
 
   valhalla:
-    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    image: ghcr.io/valhalla/valhalla-scripted:latest
     container_name: rallyify-valhalla
     restart: unless-stopped
+    # Internal-only: do not add a ports: mapping for 8002 in staging.
+    # The API reaches this service through http://valhalla:8002.
     expose:
       - "8002"
     volumes:
-      - ./valhalla:/custom_files
+      # Put united-kingdom-latest.osm.pbf and generated Valhalla files here.
+      - /data/valhalla/custom_files:/custom_files
 
 volumes:
   caddy_data:

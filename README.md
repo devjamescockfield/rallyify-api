@@ -96,15 +96,150 @@ api-dev.example.com {
 
 Replace `api-dev.example.com` in `Caddyfile`, `.env`, and DNS when using a different staging domain.
 
-Place Valhalla data/config under:
+Place Valhalla data/config under the server host path used by Compose:
 
 ```bash
-./valhalla
+/data/valhalla/custom_files
 ```
 
-For UK staging tests, place `united-kingdom-latest.osm.pbf` in that Valhalla working directory or in the subdirectory expected by the Valhalla image/config you are using. This repo does not yet include a verified tile-build command; keep Valhalla tile generation steps in server runbooks once proven against the chosen image and extract.
+The Compose volume mapping is:
+
+```yaml
+/data/valhalla/custom_files:/custom_files
+```
+
+The Valhalla scripted image reads OSM `.osm.pbf` files from `/custom_files` and writes generated config, hash files, tiles, admin/timezone data, and tar output back into that same mapped directory.
+
+For UK staging tests, place `united-kingdom-latest.osm.pbf` in `/data/valhalla/custom_files`.
 
 Do not expose Valhalla publicly. In the provided Compose file, the `valhalla` service uses `expose: 8002` instead of `ports`, so it is reachable by `rallyify-api` at `http://valhalla:8002` on the internal Docker network but not published to the host. Only add a Valhalla host port temporarily for diagnostics, and remove it before staging use.
+
+### Valhalla Tile Build Runbook
+
+Create the Valhalla data directory on the VM:
+
+```bash
+sudo mkdir -p /data/valhalla/custom_files
+sudo chown -R "$USER":"$USER" /data/valhalla
+```
+
+Download the Great Britain/UK OSM extract into the exact host path mounted by Compose:
+
+```bash
+cd /data/valhalla/custom_files
+curl -L -o united-kingdom-latest.osm.pbf \
+  https://download.geofabrik.de/europe/united-kingdom-latest.osm.pbf
+```
+
+Check that the file exists and looks plausible before starting Valhalla:
+
+```bash
+ls -lh /data/valhalla/custom_files/united-kingdom-latest.osm.pbf
+file /data/valhalla/custom_files/united-kingdom-latest.osm.pbf
+du -sh /data/valhalla/custom_files
+```
+
+Start the stack:
+
+```bash
+docker compose up --build -d
+```
+
+Watch Valhalla build logs. The first build can take a long time for the UK extract:
+
+```bash
+docker compose logs -f valhalla
+```
+
+In another shell, watch API/Caddy logs if needed:
+
+```bash
+docker compose logs -f rallyify-api caddy
+```
+
+When Valhalla is built and serving, `/health` should show `reachable: true`:
+
+```bash
+curl https://api-dev.example.com/health
+```
+
+Expected shape:
+
+```json
+{
+  "ok": true,
+  "service": "rallyify-routing-api",
+  "valhalla": {
+    "configured": true,
+    "reachable": true,
+    "version": "..."
+  }
+}
+```
+
+Smoke-test through the staging domain:
+
+```bash
+RALLYIFY_API_BASE_URL=https://api-dev.example.com \
+  python scripts/smoke_test_route.py \
+  --route inverness-ullapool \
+  --road-priority prefer_b_roads
+```
+
+Compare priority outputs once basic routing works:
+
+```bash
+RALLYIFY_API_BASE_URL=https://api-dev.example.com \
+  python scripts/compare_route_priorities.py \
+  --route inverness-ullapool
+```
+
+### Valhalla Troubleshooting
+
+No PBF files found:
+
+- Confirm the host path is exactly `/data/valhalla/custom_files`.
+- Confirm Compose maps `/data/valhalla/custom_files:/custom_files`.
+- Confirm the file ends in `.osm.pbf` and is directly inside `/data/valhalla/custom_files`.
+- Run `docker compose logs valhalla` and look for messages about `/custom_files`.
+
+Valhalla container exits:
+
+- Check `docker compose logs valhalla`.
+- Confirm the PBF download completed and is not an HTML error page: `file /data/valhalla/custom_files/united-kingdom-latest.osm.pbf`.
+- Check permissions on `/data/valhalla/custom_files`; the container must be able to write generated files there.
+- If the process is killed during build, check memory pressure with `free -h` and disk pressure with `df -h`.
+
+Build taking a long time:
+
+- This is expected for a large UK extract on a small VM.
+- Watch progress with `docker compose logs -f valhalla`.
+- Use `du -sh /data/valhalla/custom_files` to confirm generated files are growing.
+- Avoid restarting repeatedly during the first build unless logs are clearly stuck or the container has exited.
+
+Not enough disk or RAM:
+
+- Check disk with `df -h /data/valhalla/custom_files`.
+- Check memory with `free -h`.
+- Use a smaller regional extract for a first validation build if the VM is resource constrained.
+- Consider increasing VM RAM/disk before building Great Britain/UK data.
+
+Caddy/HTTPS works but `/health` is unreachable:
+
+- Confirm `ALLOWED_HOSTS` includes the staging domain.
+- Confirm `Caddyfile` uses the same domain and proxies to `rallyify-api:8000`.
+- Check `docker compose ps` for running `caddy` and `rallyify-api` containers.
+- Check `docker compose logs -f caddy rallyify-api`.
+- If `/health` returns with `valhalla.reachable=false`, Caddy and Django are working; inspect Valhalla logs and the `/data/valhalla/custom_files` contents next.
+
+`/health` works but routes return `502`:
+
+- Confirm `/health` shows `valhalla.reachable=true`. If not, Valhalla is not reachable from Django yet.
+- Check `docker compose logs -f valhalla` for tile-build failures or service startup errors.
+- Confirm the route area is covered by the loaded extract. Inverness/Ullapool routes require the UK extract to have built successfully.
+- Confirm `VALHALLA_URL=http://valhalla:8002` in `.env` and in `docker compose config` on the VM.
+- If Valhalla is still building, wait for build logs to settle before rerunning the smoke test.
+- If only long routes fail, Valhalla config may need route distance tuning in `/data/valhalla/custom_files/valhalla.json`; document and test that separately before changing staging defaults.
 
 Start staging-style services:
 
@@ -122,6 +257,13 @@ After DNS and the reverse proxy are live, smoke-test through the public staging 
 
 ```bash
 RALLYIFY_API_BASE_URL=https://api-dev.example.com python scripts/smoke_test_route.py --route inverness-ullapool
+```
+
+Prefer the route-priority staging smoke test after the first successful health check:
+
+```bash
+RALLYIFY_API_BASE_URL=https://api-dev.example.com python scripts/smoke_test_route.py --route inverness-ullapool --road-priority prefer_b_roads
+RALLYIFY_API_BASE_URL=https://api-dev.example.com python scripts/compare_route_priorities.py --route inverness-ullapool
 ```
 
 Health check:
@@ -269,6 +411,15 @@ Use `--json` to print the full raw JSON responses:
 ```bash
 python scripts/smoke_test_route.py --route inverness-ullapool --json
 ```
+
+Compare route priority outputs for the same waypoints:
+
+```bash
+python scripts/compare_route_priorities.py --route inverness-ullapool
+python scripts/compare_route_priorities.py --route inverness-applecross
+```
+
+The comparison script calls `/routes/calculate` once for each `roadPriority` value, then prints HTTP status, distance, duration, polyline point count, leg count, first manoeuvre, and distance/duration deltas compared with `balanced`. It uses `RALLYIFY_API_BASE_URL` or `http://127.0.0.1:8000` by default.
 
 ```bash
 RALLYIFY_API_BASE_URL=http://127.0.0.1:8000 python scripts/smoke_test_route.py --route belfast-inverness
