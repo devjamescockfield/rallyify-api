@@ -12,6 +12,8 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
+`.env.example` is staging-oriented. For local `runserver` development, set `DEBUG=true`, use a local `SECRET_KEY`, and use `VALHALLA_URL=http://localhost:8002` when Valhalla is published on your development machine.
+
 ## Run The API
 
 ```bash
@@ -35,19 +37,104 @@ cp .env.example .env
 docker compose up --build
 ```
 
-The `docker-compose.yml` file includes a commented Valhalla service placeholder. Building Valhalla tiles is intentionally left for a later task.
+The `docker-compose.yml` file runs Caddy, the API with Gunicorn, and Valhalla on one Docker network. Caddy is the only public service and publishes ports `80` and `443`. The API and Valhalla are internal-only Compose services.
 
 ## Environment Variables
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DEBUG` | `true` | Enables Django debug mode for local development. |
+| `DEBUG` | `true` | Enables Django debug mode for local development. Use `false` for staging. |
 | `SECRET_KEY` | Dev fallback | Django secret key. Set a real value outside local development. |
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1,0.0.0.0` | Comma-separated Django allowed hosts. |
 | `VALHALLA_URL` | `http://localhost:8002` | Base URL for the Valhalla service. |
 | `VALHALLA_TIMEOUT_SECONDS` | `10` | Outbound Valhalla request timeout. |
 | `VALHALLA_HEALTH_TIMEOUT_SECONDS` | `1` | Short `/health` probe timeout for Valhalla `/status`. |
 | `RALLYIFY_API_BASE_URL` | `http://127.0.0.1:8000` | Base URL used by local smoke-test scripts. |
+
+## Staging Deployment
+
+This repo is set up for a single Linux VM staging deployment:
+
+- Caddy is exposed on host ports `80` and `443`.
+- `rallyify-api` is internal behind Caddy at `rallyify-api:8000`.
+- `valhalla` is internal-only at `valhalla:8002`.
+- Django calls Valhalla with `VALHALLA_URL=http://valhalla:8002`.
+
+The container image runs Django with Gunicorn:
+
+```bash
+gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --access-logfile - --error-logfile -
+```
+
+For staging, create an environment file from the example:
+
+```bash
+cp .env.staging.example .env
+```
+
+Required staging values:
+
+```bash
+DEBUG=false
+SECRET_KEY=replace-me
+ALLOWED_HOSTS=api-dev.example.com,localhost,127.0.0.1
+VALHALLA_URL=http://valhalla:8002
+VALHALLA_TIMEOUT_SECONDS=10
+VALHALLA_HEALTH_TIMEOUT_SECONDS=1
+RALLYIFY_API_BASE_URL=https://api-dev.example.com
+```
+
+Point a DNS `A` record for the staging subdomain, for example `api-dev.example.com`, at the VM public IP. Forward only ports `80` and `443` from the router/firewall to the VM. Caddy will request and renew TLS certificates and reverse proxy to `rallyify-api:8000`.
+
+The included `Caddyfile` is:
+
+```caddy
+api-dev.example.com {
+    reverse_proxy rallyify-api:8000
+}
+```
+
+Replace `api-dev.example.com` in `Caddyfile`, `.env`, and DNS when using a different staging domain.
+
+Place Valhalla data/config under:
+
+```bash
+./valhalla
+```
+
+For UK staging tests, place `united-kingdom-latest.osm.pbf` in that Valhalla working directory or in the subdirectory expected by the Valhalla image/config you are using. This repo does not yet include a verified tile-build command; keep Valhalla tile generation steps in server runbooks once proven against the chosen image and extract.
+
+Do not expose Valhalla publicly. In the provided Compose file, the `valhalla` service uses `expose: 8002` instead of `ports`, so it is reachable by `rallyify-api` at `http://valhalla:8002` on the internal Docker network but not published to the host. Only add a Valhalla host port temporarily for diagnostics, and remove it before staging use.
+
+Start staging-style services:
+
+```bash
+docker compose up --build -d
+```
+
+Validate the Compose file before deploy:
+
+```bash
+docker compose config
+```
+
+After DNS and the reverse proxy are live, smoke-test through the public staging URL:
+
+```bash
+RALLYIFY_API_BASE_URL=https://api-dev.example.com python scripts/smoke_test_route.py --route inverness-ullapool
+```
+
+Health check:
+
+```bash
+curl https://api-dev.example.com/health
+```
+
+Local development can still use Django's development server:
+
+```bash
+python manage.py runserver
+```
 
 ## Endpoints
 

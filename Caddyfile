@@ -1,0 +1,3 @@
+api-dev.example.com {
+    reverse_proxy rallyify-api:8000
+}

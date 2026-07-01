@@ -1,24 +1,45 @@
 services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: rallyify-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - rallyify-api
+
   rallyify-api:
     build: .
     container_name: rallyify-api
-    ports:
-      - "8000:8000"
+    restart: unless-stopped
+    expose:
+      - "8000"
     env_file:
       - .env
     environment:
-      DEBUG: "true"
+      DEBUG: "${DEBUG:-false}"
+      SECRET_KEY: "${SECRET_KEY:?SECRET_KEY must be set}"
+      ALLOWED_HOSTS: "${ALLOWED_HOSTS:-localhost,127.0.0.1}"
       VALHALLA_URL: "http://valhalla:8002"
-    volumes:
-      - .:/app
+      VALHALLA_TIMEOUT_SECONDS: "${VALHALLA_TIMEOUT_SECONDS:-10}"
+      VALHALLA_HEALTH_TIMEOUT_SECONDS: "${VALHALLA_HEALTH_TIMEOUT_SECONDS:-1}"
+    depends_on:
+      - valhalla
 
-  # Valhalla placeholder for a later task.
-  # This project will call a self-hosted Valhalla service, but tile building
-  # and service configuration are intentionally out of scope for this bootstrap.
-  #
-  # valhalla:
-  #   image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
-  #   ports:
-  #     - "8002:8002"
-  #   volumes:
-  #     - ./valhalla:/custom_files
+  valhalla:
+    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    container_name: rallyify-valhalla
+    restart: unless-stopped
+    expose:
+      - "8002"
+    volumes:
+      - ./valhalla:/custom_files
+
+volumes:
+  caddy_data:
+  caddy_config:
