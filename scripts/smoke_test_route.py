@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import sys
+from time import perf_counter
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -115,11 +116,13 @@ def main() -> int:
         "avoidMotorways": args.avoid_motorways,
     }
 
+    route_started = perf_counter()
     route_status, route_body = post_json(
         f"{base_url}/routes/calculate",
         route_request,
     )
-    print_route_header(args.route, route_status)
+    route_duration_ms = round((perf_counter() - route_started) * 1000, 2)
+    print_route_header(args.route, route_status, route_duration_ms)
 
     if args.json:
         print("Route JSON:")
@@ -195,9 +198,10 @@ def print_health_summary(status: int, health_body: object) -> None:
     print(summary)
 
 
-def print_route_header(route_key: str, status: int) -> None:
+def print_route_header(route_key: str, status: int, duration_ms: float) -> None:
     print(f"Route: {format_route_name(route_key)}")
     print(f"POST /routes/calculate -> {status}")
+    print(f"request duration: {duration_ms} ms")
 
 
 def print_success_summary(route_body: object) -> None:

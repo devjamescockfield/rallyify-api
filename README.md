@@ -49,6 +49,7 @@ The `docker-compose.yml` file runs Caddy, the API with Gunicorn, and Valhalla on
 | `VALHALLA_URL` | `http://localhost:8002` | Base URL for the Valhalla service. |
 | `VALHALLA_TIMEOUT_SECONDS` | `10` | Outbound Valhalla request timeout. |
 | `VALHALLA_HEALTH_TIMEOUT_SECONDS` | `1` | Short `/health` probe timeout for Valhalla `/status`. |
+| `ROUTE_SLOW_WARNING_MS` | `1500` | Logs `/routes/calculate` diagnostics at warning level above this duration. |
 | `RALLYIFY_API_BASE_URL` | `http://127.0.0.1:8000` | Base URL used by local smoke-test scripts. |
 
 ## Staging Deployment

@@ -1,3 +1,6 @@
+import json
+import logging
+
 import pytest
 import requests
 from django.test import override_settings
@@ -457,3 +460,42 @@ def test_successful_response_contains_app_route_result_fields(
             "streetNames": ["Main Street"],
         }
     ]
+
+
+@override_settings(ROUTE_SLOW_WARNING_MS=-1)
+def test_route_calculate_logs_summary_metrics_without_geometry(
+    client,
+    caplog,
+    mock_valhalla_post,
+):
+    caplog.set_level(logging.WARNING, logger="routing.views")
+
+    response = client.post(
+        "/routes/calculate",
+        data=VALID_ROUTE_REQUEST,
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+    record = next(
+        item for item in caplog.records if item.name == "routing.views"
+    )
+    assert record.levelno == logging.WARNING
+
+    message = record.getMessage()
+    assert VALHALLA_POLYLINE6 not in message
+    assert "54.123" not in message
+
+    metrics = json.loads(message.split("metrics=", 1)[1])
+    assert metrics["event"] == "route_calculate"
+    assert metrics["status_code"] == 200
+    assert metrics["waypoint_count"] == 2
+    assert metrics["roadPriority"] == "balanced"
+    assert metrics["vehicleProfile"] == "car"
+    assert metrics["units"] == "imperial"
+    assert metrics["polyline_point_count"] == 2
+    assert metrics["response_size_bytes"] > 0
+    assert metrics["validation_ms"] >= 0
+    assert metrics["valhalla_request_ms"] >= 0
+    assert metrics["normalization_ms"] >= 0
+    assert metrics["response_construction_ms"] >= 0

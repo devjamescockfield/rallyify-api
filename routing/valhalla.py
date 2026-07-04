@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from time import perf_counter
 
 from django.conf import settings
 import requests
@@ -93,17 +94,20 @@ def build_valhalla_payload(route_request: dict) -> dict:
     }
 
 
-def calculate_route(route_request: dict) -> dict:
+def calculate_route(route_request: dict, diagnostics: dict | None = None) -> dict:
     payload = build_valhalla_payload(route_request)
     url = f"{settings.VALHALLA_URL.rstrip('/')}/route"
 
     try:
+        valhalla_started = perf_counter()
         response = requests.post(
             url,
             json=payload,
             timeout=settings.VALHALLA_TIMEOUT_SECONDS,
         )
+        record_duration(diagnostics, "valhalla_request_ms", valhalla_started)
     except requests.RequestException as exc:
+        record_duration(diagnostics, "valhalla_request_ms", valhalla_started)
         raise ValhallaUnavailableError from exc
 
     if not response.ok:
@@ -114,10 +118,23 @@ def calculate_route(route_request: dict) -> dict:
     except ValueError as exc:
         raise InvalidValhallaResponseError from exc
 
-    return normalize_valhalla_response(
+    normalization_started = perf_counter()
+    route = normalize_valhalla_response(
         valhalla_response=valhalla_response,
         original_request=route_request,
     )
+    record_duration(diagnostics, "normalization_ms", normalization_started)
+    return route
+
+
+def record_duration(
+    diagnostics: dict | None,
+    key: str,
+    started_at: float,
+) -> None:
+    if diagnostics is None:
+        return
+    diagnostics[key] = round((perf_counter() - started_at) * 1000, 2)
 
 
 def normalize_valhalla_response(
