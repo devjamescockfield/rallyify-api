@@ -12,7 +12,10 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-`.env.example` is staging-oriented. For local `runserver` development, set `DEBUG=true`, use a local `SECRET_KEY`, and use `VALHALLA_URL=http://localhost:8002` when Valhalla is published on your development machine.
+`.env.example` is staging-oriented. For local `runserver` development, set
+`DEPLOYMENT_ENV=development`, `DEBUG=true`, use a local `SECRET_KEY`, and use
+`VALHALLA_URL=http://localhost:8002` when Valhalla is published on your
+development machine.
 
 ## Run The API
 
@@ -34,23 +37,43 @@ ruff check .
 
 ```bash
 cp .env.example .env
+# Replace SECRET_KEY and set VALHALLA_IMAGE to the exact tested digest.
 docker compose up --build
 ```
 
 The `docker-compose.yml` file runs Caddy, the API with Gunicorn, and Valhalla on one Docker network. Caddy is the only public service and publishes ports `80` and `443`. The API and Valhalla are internal-only Compose services.
 
+The example intentionally contains an unsafe secret placeholder and no
+Valhalla image reference. Protected startup validation and Compose will refuse
+to start until both values are replaced.
+
 ## Environment Variables
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `DEPLOYMENT_ENV` | `development` | Runtime profile: `development`, `staging`, or `production`. Protected profiles enforce secure startup settings. |
 | `DEBUG` | `true` | Enables Django debug mode for local development. Use `false` for staging. |
 | `SECRET_KEY` | Dev fallback | Django secret key. Set a real value outside local development. |
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1,0.0.0.0` | Comma-separated Django allowed hosts. |
+| `REQUEST_BODY_MAX_BYTES` | `65536` | Maximum request body size accepted by Django (64 KiB). |
+| `ROUTE_RATE_LIMIT_BURST` | `30/minute` | Per-client-IP burst limit for `POST /routes/calculate`. |
+| `ROUTE_RATE_LIMIT_SUSTAINED` | `500/day` | Per-client-IP sustained limit for `POST /routes/calculate`. |
 | `VALHALLA_URL` | `http://localhost:8002` | Base URL for the Valhalla service. |
 | `VALHALLA_TIMEOUT_SECONDS` | `10` | Outbound Valhalla request timeout. |
 | `VALHALLA_HEALTH_TIMEOUT_SECONDS` | `1` | Short `/health` probe timeout for Valhalla `/status`. |
 | `ROUTE_SLOW_WARNING_MS` | `1500` | Logs `/routes/calculate` diagnostics at warning level above this duration. |
+| `GUNICORN_WORKERS` | `3` | Gunicorn worker process count. |
+| `GUNICORN_TIMEOUT_SECONDS` | `30` | Hard worker timeout in seconds. |
+| `GUNICORN_GRACEFUL_TIMEOUT_SECONDS` | `30` | Graceful worker restart timeout in seconds. |
+| `GUNICORN_MAX_REQUESTS` | `1000` | Requests handled before recycling a worker. |
+| `GUNICORN_MAX_REQUESTS_JITTER` | `100` | Random jitter added to worker recycling. |
+| `VALHALLA_IMAGE` | none | Required exact tested Valhalla tag or, preferably, repository digest for Compose. |
 | `RALLYIFY_API_BASE_URL` | `http://127.0.0.1:8000` | Base URL used by local smoke-test scripts. |
+
+The route throttle uses Django's cache and the client IP forwarded by the
+single Caddy proxy. With the default in-memory cache, each Gunicorn worker has
+its own counters, so this is a basic beta guard rather than a precise
+distributed quota.
 
 ## Staging Deployment
 
@@ -61,10 +84,19 @@ This repo is set up for a single Linux VM staging deployment:
 - `valhalla` is internal-only at `valhalla:8002`.
 - Django calls Valhalla with `VALHALLA_URL=http://valhalla:8002`.
 
-The container image runs Django with Gunicorn:
+The API container runs as the unprivileged `rallyify` user and starts Django
+with Gunicorn. The equivalent command with default values is:
 
 ```bash
-gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --access-logfile - --error-logfile -
+gunicorn config.wsgi:application \
+  --bind 0.0.0.0:8000 \
+  --workers 3 \
+  --timeout 30 \
+  --graceful-timeout 30 \
+  --max-requests 1000 \
+  --max-requests-jitter 100 \
+  --access-logfile - \
+  --error-logfile -
 ```
 
 For staging, create an environment file from the example:
@@ -76,14 +108,30 @@ cp .env.staging.example .env
 Required staging values:
 
 ```bash
+DEPLOYMENT_ENV=staging
 DEBUG=false
-SECRET_KEY=replace-me
+SECRET_KEY=<generate-a-long-random-value>
 ALLOWED_HOSTS=api-dev.example.com,localhost,127.0.0.1
+VALHALLA_IMAGE=ghcr.io/valhalla/valhalla-scripted@sha256:<tested-digest>
 VALHALLA_URL=http://valhalla:8002
 VALHALLA_TIMEOUT_SECONDS=10
 VALHALLA_HEALTH_TIMEOUT_SECONDS=1
+REQUEST_BODY_MAX_BYTES=65536
+ROUTE_RATE_LIMIT_BURST=30/minute
+ROUTE_RATE_LIMIT_SUSTAINED=500/day
 RALLYIFY_API_BASE_URL=https://api-dev.example.com
 ```
+
+Generate a secret without storing it in shell history:
+
+```bash
+python -c 'import secrets; print(secrets.token_urlsafe(64))'
+```
+
+For `staging` and `production`, Django refuses to start if `DEBUG` is true,
+`SECRET_KEY` is missing or still uses a documented placeholder,
+`ALLOWED_HOSTS` is missing or contains `*`, or the deployment environment is
+unknown.
 
 Point a DNS `A` record for the staging subdomain, for example `api-dev.example.com`, at the VM public IP. Forward only ports `80` and `443` from the router/firewall to the VM. Caddy will request and renew TLS certificates and reverse proxy to `rallyify-api:8000`.
 
@@ -114,6 +162,27 @@ The Valhalla scripted image reads OSM `.osm.pbf` files from `/custom_files` and 
 For UK staging tests, place `united-kingdom-latest.osm.pbf` in `/data/valhalla/custom_files`.
 
 Do not expose Valhalla publicly. In the provided Compose file, the `valhalla` service uses `expose: 8002` instead of `ports`, so it is reachable by `rallyify-api` at `http://valhalla:8002` on the internal Docker network but not published to the host. Only add a Valhalla host port temporarily for diagnostics, and remove it before staging use.
+
+Compose requires `VALHALLA_IMAGE` to be an exact tested reference and will
+fail before deployment if it is absent. This repository cannot derive the
+current staging digest from source because the historical Compose reference
+was `latest`. On the VM that already has the tested image, capture its
+repository digest before pulling a newer image:
+
+```bash
+docker image inspect ghcr.io/valhalla/valhalla-scripted:latest \
+  --format '{{index .RepoDigests 0}}'
+```
+
+Put the returned
+`ghcr.io/valhalla/valhalla-scripted@sha256:...` value in `.env` as
+`VALHALLA_IMAGE`. Keep that value with the release record so a rollback uses
+the same image and persisted routing data.
+
+All three services use Docker's `json-file` log driver with a maximum of five
+10 MiB files per container. Compose healthchecks probe Valhalla `/status` and
+the API's strict `/ready` endpoint. Caddy starts after the API is healthy, and
+the API starts after Valhalla is healthy.
 
 ### Valhalla Tile Build Runbook
 
@@ -299,9 +368,22 @@ Returns service health without failing when Valhalla is unavailable.
 
 `version` is included only when Valhalla's `/status` response provides it. `/health` still returns `200` when Valhalla is unavailable; in that case `reachable` is `false`.
 
+### `GET /ready`
+
+Readiness uses the same summary shape as `/health`, but is strict for
+orchestration. It returns `200` with `"ok": true` only when Valhalla `/status`
+is reachable. It returns `503` with `"ok": false` while Valhalla is starting
+or unavailable. This does not alter the public `/health` contract.
+
 ### `POST /routes/calculate`
 
 Validates a Rallyify route request, forwards it to Valhalla's `/route` API, and returns a normalized response.
+
+Requests must contain between 2 and 25 waypoints. Each optional waypoint name
+is limited to 100 characters; latitude and longitude retain their existing
+geographic bounds. Django rejects request bodies larger than 64 KiB by
+default. The endpoint returns `429` when either configured per-client-IP route
+limit is exceeded.
 
 Request:
 

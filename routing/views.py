@@ -4,10 +4,11 @@ from time import perf_counter
 
 from django.conf import settings
 from rest_framework import status
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, throttle_classes
 from rest_framework.response import Response
 
 from routing.serializers import RouteCalculationSerializer
+from routing.throttles import RouteBurstThrottle, RouteSustainedThrottle
 from routing.valhalla import (
     InvalidValhallaResponseError,
     ValhallaUnavailableError,
@@ -29,7 +30,26 @@ def health(request):
     )
 
 
+@api_view(["GET"])
+def readiness(request):
+    valhalla = get_valhalla_status()
+    is_ready = bool(valhalla["reachable"])
+    return Response(
+        {
+            "ok": is_ready,
+            "service": "rallyify-routing-api",
+            "valhalla": valhalla,
+        },
+        status=(
+            status.HTTP_200_OK
+            if is_ready
+            else status.HTTP_503_SERVICE_UNAVAILABLE
+        ),
+    )
+
+
 @api_view(["POST"])
+@throttle_classes([RouteBurstThrottle, RouteSustainedThrottle])
 def calculate_route(request):
     request_started = perf_counter()
     diagnostics = {}
@@ -77,6 +97,7 @@ def calculate_route(request):
             route_request=route_request,
         )
     except Exception:
+        logger.exception("Unexpected route calculation failure")
         return build_route_response(
             body={
                 "error": "An unexpected error occurred.",

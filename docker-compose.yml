@@ -1,8 +1,15 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   caddy:
     image: caddy:2-alpine
     container_name: rallyify-caddy
     restart: unless-stopped
+    logging: *default-logging
     # Public edge: Caddy is the only service that should publish host ports.
     ports:
       - "80:80"
@@ -12,12 +19,14 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - rallyify-api
+      rallyify-api:
+        condition: service_healthy
 
   rallyify-api:
     build: .
     container_name: rallyify-api
     restart: unless-stopped
+    logging: *default-logging
     # Internal-only: Caddy reaches the API at http://rallyify-api:8000.
     # Do not add a ports: mapping here for staging.
     expose:
@@ -25,23 +34,52 @@ services:
     env_file:
       - .env
     environment:
+      DEPLOYMENT_ENV: "${DEPLOYMENT_ENV:-staging}"
       DEBUG: "${DEBUG:-false}"
       SECRET_KEY: "${SECRET_KEY:?SECRET_KEY must be set}"
-      ALLOWED_HOSTS: "${ALLOWED_HOSTS:-localhost,127.0.0.1}"
+      ALLOWED_HOSTS: "${ALLOWED_HOSTS:?ALLOWED_HOSTS must be set}"
       VALHALLA_URL: "http://valhalla:8002"
       VALHALLA_TIMEOUT_SECONDS: "${VALHALLA_TIMEOUT_SECONDS:-10}"
       VALHALLA_HEALTH_TIMEOUT_SECONDS: "${VALHALLA_HEALTH_TIMEOUT_SECONDS:-1}"
+      REQUEST_BODY_MAX_BYTES: "${REQUEST_BODY_MAX_BYTES:-65536}"
+      ROUTE_RATE_LIMIT_BURST: "${ROUTE_RATE_LIMIT_BURST:-30/minute}"
+      ROUTE_RATE_LIMIT_SUSTAINED: "${ROUTE_RATE_LIMIT_SUSTAINED:-500/day}"
+      GUNICORN_WORKERS: "${GUNICORN_WORKERS:-3}"
+      GUNICORN_TIMEOUT_SECONDS: "${GUNICORN_TIMEOUT_SECONDS:-30}"
+      GUNICORN_GRACEFUL_TIMEOUT_SECONDS: "${GUNICORN_GRACEFUL_TIMEOUT_SECONDS:-30}"
+      GUNICORN_MAX_REQUESTS: "${GUNICORN_MAX_REQUESTS:-1000}"
+      GUNICORN_MAX_REQUESTS_JITTER: "${GUNICORN_MAX_REQUESTS_JITTER:-100}"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2)"
+      interval: 15s
+      timeout: 3s
+      retries: 4
+      start_period: 30s
     depends_on:
-      - valhalla
+      valhalla:
+        condition: service_healthy
 
   valhalla:
-    image: ghcr.io/valhalla/valhalla-scripted:latest
+    image: "${VALHALLA_IMAGE:?Set VALHALLA_IMAGE to the exact tested tag or digest}"
     container_name: rallyify-valhalla
     restart: unless-stopped
+    logging: *default-logging
     # Internal-only: do not add a ports: mapping for 8002 in staging.
     # The API reaches this service through http://valhalla:8002.
     expose:
       - "8002"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "curl --fail --silent --show-error http://127.0.0.1:8002/status >/dev/null"
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 30m
     volumes:
       # Put united-kingdom-latest.osm.pbf and generated Valhalla files here.
       - /data/valhalla/custom_files:/custom_files

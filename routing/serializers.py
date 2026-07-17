@@ -4,11 +4,15 @@ from rest_framework import serializers
 class WaypointSerializer(serializers.Serializer):
     latitude = serializers.FloatField(min_value=-90, max_value=90)
     longitude = serializers.FloatField(min_value=-180, max_value=180)
-    name = serializers.CharField(required=False, allow_blank=True)
+    name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=100,
+    )
 
 
 class RouteCalculationSerializer(serializers.Serializer):
-    waypoints = WaypointSerializer(many=True, min_length=2)
+    waypoints = WaypointSerializer(many=True, min_length=2, max_length=25)
     vehicleProfile = serializers.ChoiceField(choices=["car", "motorbike", "caravan"])
     roadPriority = serializers.ChoiceField(
         choices=[

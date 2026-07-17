@@ -3,18 +3,40 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from config.runtime import (
+    DEVELOPMENT_SECRET_KEY,
+    parse_boolean_environment_variable,
+    validate_runtime_configuration,
+)
+
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-rallyify-dev-secret-key")
-DEBUG = os.getenv("DEBUG", "true").lower() in {"1", "true", "yes", "on"}
+DEPLOYMENT_ENV = os.getenv("DEPLOYMENT_ENV", "development").strip().lower()
+SECRET_KEY_ENV = os.getenv("SECRET_KEY")
+ALLOWED_HOSTS_ENV = os.getenv("ALLOWED_HOSTS")
+
+SECRET_KEY = SECRET_KEY_ENV or DEVELOPMENT_SECRET_KEY
+DEBUG = parse_boolean_environment_variable(
+    "DEBUG",
+    os.getenv("DEBUG", "true"),
+)
 
 ALLOWED_HOSTS = [
     host.strip()
-    for host in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,0.0.0.0").split(",")
+    for host in (
+        ALLOWED_HOSTS_ENV or "localhost,127.0.0.1,0.0.0.0"
+    ).split(",")
     if host.strip()
 ]
+
+validate_runtime_configuration(
+    deployment_environment=DEPLOYMENT_ENV,
+    debug=DEBUG,
+    secret_key_env=SECRET_KEY_ENV,
+    allowed_hosts_env=ALLOWED_HOSTS_ENV,
+)
 
 INSTALLED_APPS = [
     "django.contrib.auth",
@@ -75,9 +97,19 @@ REST_FRAMEWORK = {
         "rest_framework.renderers.JSONRenderer",
     ],
     "DEFAULT_PARSER_CLASSES": [
-        "rest_framework.parsers.JSONParser",
+        "routing.parsers.LimitedJSONParser",
     ],
+    "DEFAULT_THROTTLE_RATES": {
+        "route_burst": os.getenv("ROUTE_RATE_LIMIT_BURST", "30/minute"),
+        "route_sustained": os.getenv("ROUTE_RATE_LIMIT_SUSTAINED", "500/day"),
+    },
+    # Caddy is the single trusted proxy in the staging Compose deployment.
+    "NUM_PROXIES": 1,
 }
+
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(
+    os.getenv("REQUEST_BODY_MAX_BYTES", str(64 * 1024))
+)
 
 VALHALLA_URL = os.getenv("VALHALLA_URL", "http://localhost:8002")
 VALHALLA_TIMEOUT_SECONDS = float(os.getenv("VALHALLA_TIMEOUT_SECONDS", "10"))

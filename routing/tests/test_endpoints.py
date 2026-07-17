@@ -3,8 +3,10 @@ import logging
 
 import pytest
 import requests
+from django.core.cache import cache
 from django.test import override_settings
 
+from routing.throttles import RouteBurstThrottle, RouteSustainedThrottle
 from routing.valhalla import build_valhalla_payload
 
 
@@ -92,6 +94,13 @@ def mock_valhalla_post(monkeypatch):
     return calls
 
 
+@pytest.fixture(autouse=True)
+def clear_throttle_cache():
+    cache.clear()
+    yield
+    cache.clear()
+
+
 def test_health_returns_200_when_valhalla_unavailable(client, monkeypatch):
     def get(url, timeout):
         raise requests.Timeout
@@ -137,6 +146,38 @@ def test_health_reports_valhalla_reachable_with_version(client, monkeypatch):
         "version": "3.5.1",
     }
     assert calls == [{"url": "http://localhost:8002/status", "timeout": 1.0}]
+
+
+def test_readiness_returns_503_when_valhalla_unavailable(client, monkeypatch):
+    def get(url, timeout):
+        raise requests.Timeout
+
+    monkeypatch.setattr("routing.valhalla.requests.get", get)
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "ok": False,
+        "service": "rallyify-routing-api",
+        "valhalla": {
+            "configured": True,
+            "reachable": False,
+        },
+    }
+
+
+def test_readiness_returns_200_when_valhalla_is_reachable(client, monkeypatch):
+    def get(url, timeout):
+        return MockValhallaStatusResponse(payload={"version": "3.5.1"})
+
+    monkeypatch.setattr("routing.valhalla.requests.get", get)
+
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["valhalla"]["reachable"] is True
 
 
 @override_settings(VALHALLA_URL="http://localhost:8002")
@@ -276,6 +317,75 @@ def test_invalid_waypoint_count_returns_400(client):
     )
 
     assert response.status_code == 400
+
+
+def test_more_than_25_waypoints_returns_400(client):
+    waypoint = VALID_ROUTE_REQUEST["waypoints"][0]
+    response = client.post(
+        "/routes/calculate",
+        data=VALID_ROUTE_REQUEST | {"waypoints": [waypoint] * 26},
+        content_type="application/json",
+    )
+
+    assert response.status_code == 400
+    assert "waypoints" in response.json()
+
+
+def test_waypoint_name_longer_than_100_characters_returns_400(client):
+    waypoints = [
+        VALID_ROUTE_REQUEST["waypoints"][0] | {"name": "x" * 101},
+        VALID_ROUTE_REQUEST["waypoints"][1],
+    ]
+    response = client.post(
+        "/routes/calculate",
+        data=VALID_ROUTE_REQUEST | {"waypoints": waypoints},
+        content_type="application/json",
+    )
+
+    assert response.status_code == 400
+    assert "name" in response.json()["waypoints"][0]
+
+
+@override_settings(DATA_UPLOAD_MAX_MEMORY_SIZE=200)
+def test_oversized_request_body_returns_413(client):
+    response = client.post(
+        "/routes/calculate",
+        data=VALID_ROUTE_REQUEST
+        | {
+            "waypoints": [
+                VALID_ROUTE_REQUEST["waypoints"][0] | {"name": "x" * 100},
+                VALID_ROUTE_REQUEST["waypoints"][1] | {"name": "y" * 100},
+            ]
+        },
+        content_type="application/json",
+    )
+
+    assert response.status_code == 413
+
+
+def test_route_requests_are_throttled_by_client_ip(
+    client,
+    mock_valhalla_post,
+    monkeypatch,
+):
+    monkeypatch.setattr(RouteBurstThrottle, "get_rate", lambda self: "2/minute")
+    monkeypatch.setattr(
+        RouteSustainedThrottle,
+        "get_rate",
+        lambda self: "100/day",
+    )
+
+    responses = [
+        client.post(
+            "/routes/calculate",
+            data=VALID_ROUTE_REQUEST,
+            content_type="application/json",
+            REMOTE_ADDR="198.51.100.10",
+        )
+        for _ in range(3)
+    ]
+
+    assert [response.status_code for response in responses] == [200, 200, 429]
 
 
 @pytest.mark.parametrize(
@@ -499,3 +609,31 @@ def test_route_calculate_logs_summary_metrics_without_geometry(
     assert metrics["valhalla_request_ms"] >= 0
     assert metrics["normalization_ms"] >= 0
     assert metrics["response_construction_ms"] >= 0
+
+
+def test_unexpected_route_error_logs_exception_without_geometry(
+    client,
+    caplog,
+    monkeypatch,
+):
+    def fail(route_request, diagnostics):
+        raise RuntimeError("synthetic failure")
+
+    monkeypatch.setattr("routing.views.calculate_valhalla_route", fail)
+    caplog.set_level(logging.ERROR, logger="routing.views")
+
+    response = client.post(
+        "/routes/calculate",
+        data=VALID_ROUTE_REQUEST,
+        content_type="application/json",
+    )
+
+    assert response.status_code == 500
+    record = next(
+        item
+        for item in caplog.records
+        if item.getMessage() == "Unexpected route calculation failure"
+    )
+    assert record.exc_info is not None
+    assert VALHALLA_POLYLINE6 not in record.getMessage()
+    assert "54.123" not in record.getMessage()
