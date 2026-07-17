@@ -8,6 +8,11 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
+REQUEST_HEADERS = {
+    "Accept": "application/json",
+    "User-Agent": "Rallyify-Smoke-Test/1.0",
+}
+
 ROUTES = {
     "belfast-inverness": [
         {
@@ -145,7 +150,7 @@ def main() -> int:
 
 
 def get_json(url: str) -> tuple[int, object]:
-    request = Request(url, method="GET")
+    request = Request(url, headers=REQUEST_HEADERS, method="GET")
     return request_json(request)
 
 
@@ -154,7 +159,10 @@ def post_json(url: str, payload: dict) -> tuple[int, object]:
     request = Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={
+            **REQUEST_HEADERS,
+            "Content-Type": "application/json",
+        },
         method="POST",
     )
     return request_json(request)
@@ -166,11 +174,23 @@ def request_json(request: Request) -> tuple[int, object]:
             body = response.read().decode("utf-8")
             return response.status, parse_json(body)
     except HTTPError as exc:
-        body = exc.read().decode("utf-8")
+        body = exc.read().decode("utf-8", errors="replace")
+        print_http_error(exc, body)
         return exc.code, parse_json(body)
     except URLError as exc:
         print(f"Could not reach Rallyify API: {exc}", file=sys.stderr)
         return 0, {"error": "Rallyify API is unavailable."}
+
+
+def print_http_error(exc: HTTPError, body: str) -> None:
+    print(f"HTTP error status: {exc.code}", file=sys.stderr)
+    print(f"Server: {exc.headers.get('Server', 'unknown')}", file=sys.stderr)
+    cf_ray = exc.headers.get("CF-Ray")
+    if cf_ray:
+        print(f"CF-Ray: {cf_ray}", file=sys.stderr)
+    if body:
+        print("Response body:", file=sys.stderr)
+        print(body, file=sys.stderr)
 
 
 def parse_json(body: str) -> object:
