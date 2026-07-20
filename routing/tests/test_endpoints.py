@@ -1,5 +1,6 @@
 import json
 import logging
+import uuid
 
 import pytest
 import requests
@@ -7,7 +8,15 @@ from django.core.cache import cache
 from django.test import override_settings
 
 from routing.throttles import RouteBurstThrottle, RouteSustainedThrottle
-from routing.valhalla import build_valhalla_payload
+from routing.models import RouteDiagnostic
+from routing.valhalla import (
+    RouteValidationError,
+    build_valhalla_payload,
+    validate_route_response,
+)
+
+
+pytestmark = pytest.mark.django_db
 
 
 VALID_ROUTE_REQUEST = {
@@ -148,6 +157,38 @@ def test_health_reports_valhalla_reachable_with_version(client, monkeypatch):
     assert calls == [{"url": "http://localhost:8002/status", "timeout": 1.0}]
 
 
+@override_settings(
+    VALHALLA_ENGINE_VERSION="3.7.0-test",
+    VALHALLA_GRAPH_BUILD_ID="uk-2026-07-20",
+    VALHALLA_OSM_DATA_DATE="2026-07-19",
+)
+def test_graph_information_returns_engine_graph_and_supported_contract(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "routing.valhalla.requests.get",
+        lambda url, timeout: MockValhallaStatusResponse(),
+    )
+    response = client.get("/routing/graph-info")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "routingEngine": "valhalla",
+        "engineVersion": "3.7.0-test",
+        "graphBuildId": "uk-2026-07-20",
+        "osmDataDate": "2026-07-19",
+        "supportedVehicleProfiles": ["car", "motorbike", "caravan"],
+        "supportedRoutePriorities": [
+            "fastest",
+            "balanced",
+            "scenic",
+            "avoid_motorways",
+            "prefer_b_roads",
+        ],
+    }
+
+
 def test_readiness_returns_503_when_valhalla_unavailable(client, monkeypatch):
     def get(url, timeout):
         raise requests.Timeout
@@ -210,7 +251,7 @@ def test_request_payload_maps_waypoints_to_lat_lon(client, mock_valhalla_post):
     [
         ("car", "auto"),
         ("motorbike", "motorcycle"),
-        ("caravan", "auto"),
+        ("caravan", "truck"),
     ],
 )
 def test_vehicle_profile_maps_to_valhalla_costing(vehicle_profile, expected_costing):
@@ -418,6 +459,22 @@ def test_invalid_vehicle_profile_returns_400(client):
     assert response.status_code == 400
 
 
+def test_non_finite_waypoint_coordinate_returns_400(client):
+    response = client.post(
+        "/routes/calculate",
+        data=VALID_ROUTE_REQUEST
+        | {
+            "waypoints": [
+                VALID_ROUTE_REQUEST["waypoints"][0] | {"latitude": "NaN"},
+                VALID_ROUTE_REQUEST["waypoints"][1],
+            ]
+        },
+        content_type="application/json",
+    )
+
+    assert response.status_code == 400
+
+
 def test_invalid_road_priority_returns_400(client):
     response = client.post(
         "/routes/calculate",
@@ -497,9 +554,43 @@ def test_valhalla_response_without_decodable_shape_returns_502(client, monkeypat
     )
 
     assert response.status_code == 502
-    assert response.json()["code"] == "INVALID_VALHALLA_RESPONSE"
+    assert response.json()["code"] == "INVALID_ROUTE_RESULT"
+    assert response.json()["reason"] == "MALFORMED_GEOMETRY"
 
 
+def test_valhalla_response_without_legs_returns_structured_rejection(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "routing.valhalla.requests.post",
+        lambda url, json, timeout: MockValhallaResponse(
+            payload={
+                "trip": {
+                    "status": 0,
+                    "summary": {"length": 10, "time": 1200},
+                    "legs": [],
+                }
+            }
+        ),
+    )
+
+    response = client.post(
+        "/routes/calculate",
+        data=VALID_ROUTE_REQUEST,
+        content_type="application/json",
+    )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "INVALID_ROUTE_RESULT"
+    assert response.json()["reason"] == "MISSING_LEGS"
+
+
+@override_settings(
+    VALHALLA_ENGINE_VERSION="3.7.0-test",
+    VALHALLA_GRAPH_BUILD_ID="uk-2026-07-20",
+    VALHALLA_OSM_DATA_DATE="2026-07-19",
+)
 def test_successful_response_returns_normalized_route(client, mock_valhalla_post):
     response = client.post(
         "/routes/calculate",
@@ -508,7 +599,13 @@ def test_successful_response_returns_normalized_route(client, mock_valhalla_post
     )
 
     assert response.status_code == 200
-    assert response.json() == {
+    body = response.json()
+    request_id = body["requestId"]
+    assert str(uuid.UUID(request_id)) == request_id
+    assert response["X-Route-Request-ID"] == request_id
+    assert response["X-Request-ID"] == request_id
+    assert response["X-Rallyify-Graph-Version"] == "uk-2026-07-20"
+    assert body == {
         "encodedPolyline": VALHALLA_POLYLINE6,
         "polyline": [
             [-5.123, 54.123],
@@ -536,9 +633,29 @@ def test_successful_response_returns_normalized_route(client, mock_valhalla_post
         ],
         "waypoints": VALID_ROUTE_REQUEST["waypoints"],
         "provider": "valhalla",
-        "generatedAt": response.json()["generatedAt"],
+        "generatedAt": body["generatedAt"],
+        "requestId": request_id,
+        "routingMetadata": {
+            "provider": "valhalla",
+            "engineVersion": "3.7.0-test",
+            "graphBuildId": "uk-2026-07-20",
+            "osmDataDate": "2026-07-19",
+            "costingProfile": "auto",
+            "roadPriority": "balanced",
+            "units": "imperial",
+            "fallbackUsed": False,
+            "endpointSnaps": {
+                "start": "under_25m",
+                "destination": "under_25m",
+            },
+        },
     }
-    assert response.json()["generatedAt"]
+    assert body["generatedAt"]
+
+    diagnostic = RouteDiagnostic.objects.get(request_id=request_id)
+    assert diagnostic.exact_diagnostics["startSnapMetres"] == 0
+    assert diagnostic.exact_diagnostics["destinationSnapMetres"] == 0
+    assert "startSnapMetres" not in body["routingMetadata"]["endpointSnaps"]
 
 
 def test_successful_response_contains_app_route_result_fields(
@@ -587,9 +704,7 @@ def test_route_calculate_logs_summary_metrics_without_geometry(
     )
 
     assert response.status_code == 200
-    record = next(
-        item for item in caplog.records if item.name == "routing.views"
-    )
+    record = next(item for item in caplog.records if "metrics=" in item.getMessage())
     assert record.levelno == logging.WARNING
 
     message = record.getMessage()
@@ -598,6 +713,7 @@ def test_route_calculate_logs_summary_metrics_without_geometry(
 
     metrics = json.loads(message.split("metrics=", 1)[1])
     assert metrics["event"] == "route_calculate"
+    assert str(uuid.UUID(metrics["request_id"])) == metrics["request_id"]
     assert metrics["status_code"] == 200
     assert metrics["waypoint_count"] == 2
     assert metrics["roadPriority"] == "balanced"
@@ -632,8 +748,90 @@ def test_unexpected_route_error_logs_exception_without_geometry(
     record = next(
         item
         for item in caplog.records
-        if item.getMessage() == "Unexpected route calculation failure"
+        if item.getMessage().startswith("Unexpected route calculation failure")
     )
     assert record.exc_info is not None
     assert VALHALLA_POLYLINE6 not in record.getMessage()
     assert "54.123" not in record.getMessage()
+
+
+def test_non_finite_route_distance_is_rejected(client, monkeypatch):
+    def post(url, json, timeout):
+        payload = {
+            **VALHALLA_RESPONSE,
+            "trip": {
+                **VALHALLA_RESPONSE["trip"],
+                "summary": {"length": float("nan"), "time": 1200},
+            },
+        }
+        return MockValhallaResponse(payload=payload)
+
+    monkeypatch.setattr("routing.valhalla.requests.post", post)
+
+    response = client.post(
+        "/routes/calculate",
+        data=VALID_ROUTE_REQUEST,
+        content_type="application/json",
+    )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "INVALID_ROUTE_RESULT"
+    assert response.json()["reason"] == "NON_FINITE_DISTANCE"
+    assert response.json()["requestId"]
+
+
+def test_implausibly_distant_endpoint_snap_is_rejected(client, monkeypatch):
+    def normalize(valhalla_response, original_request):
+        return {
+            "encodedPolyline": "test",
+            "polyline": [[-0.1, 51.5], [-0.2, 51.6]],
+            "distanceMetres": 1000,
+            "durationSeconds": 100,
+            "legs": [{"maneuvers": []}],
+            "waypoints": original_request["waypoints"],
+            "provider": "valhalla",
+            "generatedAt": "2026-07-20T12:00:00+00:00",
+        }
+
+    monkeypatch.setattr("routing.valhalla.normalize_valhalla_response", normalize)
+    monkeypatch.setattr(
+        "routing.valhalla.requests.post",
+        lambda url, json, timeout: MockValhallaResponse(),
+    )
+
+    response = client.post(
+        "/routes/calculate",
+        data=VALID_ROUTE_REQUEST,
+        content_type="application/json",
+    )
+
+    assert response.status_code == 502
+    assert response.json()["reason"] == "ENDPOINT_SNAP_TOO_DISTANT"
+
+
+@override_settings(ROUTE_MAX_GEOMETRY_GAP_METRES=1000)
+def test_severe_geometry_discontinuity_is_rejected():
+    route = {
+        "polyline": [[-5.123, 54.123], [-5.2, 54.2], [-5.456, 54.456]],
+        "distanceMetres": 50_000,
+        "durationSeconds": 3600,
+        "legs": [{"maneuvers": []}],
+    }
+
+    with pytest.raises(
+        RouteValidationError,
+        match="SEVERE_GEOMETRY_DISCONTINUITY",
+    ):
+        validate_route_response(route, VALID_ROUTE_REQUEST)
+
+
+def test_obvious_start_end_reversal_is_rejected():
+    route = {
+        "polyline": [[-5.456, 54.456], [-5.123, 54.123]],
+        "distanceMetres": 50_000,
+        "durationSeconds": 3600,
+        "legs": [{"maneuvers": []}],
+    }
+
+    with pytest.raises(RouteValidationError, match="START_END_REVERSED"):
+        validate_route_response(route, VALID_ROUTE_REQUEST)

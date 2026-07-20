@@ -14,6 +14,7 @@ def validate_protected_environment(**overrides):
         "debug": False,
         "secret_key_env": "a-real-staging-secret",
         "allowed_hosts_env": "api-dev.example.com",
+        "report_tokens_env": "a-secure-beta-report-token-that-is-long-enough",
     }
     values.update(overrides)
     validate_runtime_configuration(**values)
@@ -45,6 +46,15 @@ def test_missing_or_placeholder_secret_is_rejected(secret_key):
 def test_missing_or_wildcard_allowed_hosts_are_rejected(allowed_hosts):
     with pytest.raises(ImproperlyConfigured, match="ALLOWED_HOSTS"):
         validate_protected_environment(allowed_hosts_env=allowed_hosts)
+
+
+@pytest.mark.parametrize(
+    "report_tokens",
+    [None, "", "short", "replace-with-a-long-random-beta-token"],
+)
+def test_missing_or_insecure_report_tokens_are_rejected(report_tokens):
+    with pytest.raises(ImproperlyConfigured, match="ROUTE_REPORT_BEARER_TOKENS"):
+        validate_protected_environment(report_tokens_env=report_tokens)
 
 
 def test_development_keeps_local_fallbacks_available():

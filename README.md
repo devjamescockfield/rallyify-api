@@ -58,9 +58,19 @@ to start until both values are replaced.
 | `REQUEST_BODY_MAX_BYTES` | `65536` | Maximum request body size accepted by Django (64 KiB). |
 | `ROUTE_RATE_LIMIT_BURST` | `30/minute` | Per-client-IP burst limit for `POST /routes/calculate`. |
 | `ROUTE_RATE_LIMIT_SUSTAINED` | `500/day` | Per-client-IP sustained limit for `POST /routes/calculate`. |
+| `ROUTE_REPORT_RATE_LIMIT` | `10/hour` | Per beta-token throttle for `POST /routes/report`. |
+| `ROUTE_REPORT_BEARER_TOKENS` | none | Comma-separated beta report tokens. Protected deployments require tokens of at least 32 characters. |
+| `ROUTE_DIAGNOSTIC_RETENTION_DAYS` | `14` | Retention for restricted route diagnostics. |
+| `ROUTE_REPORT_RETENTION_DAYS` | `14` | Retention for route-quality reports. |
+| `ROUTE_MAX_ENDPOINT_SNAP_METRES` | `5000` | Maximum accepted start or destination snap distance. |
+| `ROUTE_MAX_GEOMETRY_GAP_METRES` | `100000` | Maximum accepted gap between adjacent decoded geometry points. |
 | `VALHALLA_URL` | `http://localhost:8002` | Base URL for the Valhalla service. |
 | `VALHALLA_TIMEOUT_SECONDS` | `10` | Outbound Valhalla request timeout. |
 | `VALHALLA_HEALTH_TIMEOUT_SECONDS` | `1` | Short `/health` probe timeout for Valhalla `/status`. |
+| `VALHALLA_ENGINE_VERSION` | status value | Optional explicit engine version when `/status` does not expose it. |
+| `VALHALLA_GRAPH_BUILD_ID` | none | Operator-assigned identifier for the deployed graph build. |
+| `VALHALLA_OSM_DATA_DATE` | none | Operator-supplied OSM source-data date for the graph. |
+| `DATABASE_PATH` | `db.sqlite3` | Diagnostic/report SQLite path; Compose uses `/app/data/db.sqlite3`. |
 | `ROUTE_SLOW_WARNING_MS` | `1500` | Logs `/routes/calculate` diagnostics at warning level above this duration. |
 | `GUNICORN_WORKERS` | `3` | Gunicorn worker process count. |
 | `GUNICORN_TIMEOUT_SECONDS` | `30` | Hard worker timeout in seconds. |
@@ -119,6 +129,12 @@ VALHALLA_HEALTH_TIMEOUT_SECONDS=1
 REQUEST_BODY_MAX_BYTES=65536
 ROUTE_RATE_LIMIT_BURST=30/minute
 ROUTE_RATE_LIMIT_SUSTAINED=500/day
+ROUTE_REPORT_RATE_LIMIT=10/hour
+ROUTE_REPORT_BEARER_TOKENS=<generate-a-separate-long-random-value>
+ROUTE_DIAGNOSTIC_RETENTION_DAYS=14
+ROUTE_REPORT_RETENTION_DAYS=14
+VALHALLA_GRAPH_BUILD_ID=uk-<build-date-or-release-id>
+VALHALLA_OSM_DATA_DATE=<source-data-date>
 RALLYIFY_API_BASE_URL=https://api-dev.example.com
 ```
 
@@ -131,7 +147,17 @@ python -c 'import secrets; print(secrets.token_urlsafe(64))'
 For `staging` and `production`, Django refuses to start if `DEBUG` is true,
 `SECRET_KEY` is missing or still uses a documented placeholder,
 `ALLOWED_HOSTS` is missing or contains `*`, or the deployment environment is
-unknown.
+unknown. Protected startup also requires at least one non-placeholder beta
+report token of 32 or more characters.
+
+The container runs `python manage.py migrate --noinput` before Gunicorn starts.
+Compose persists the SQLite diagnostic/report database in the
+`route_beta_data` volume. Back up that volume before deployment changes that
+touch migrations, then rebuild and restart with:
+
+```bash
+docker compose up --build -d
+```
 
 Point a DNS `A` record for the staging subdomain, for example `api-dev.example.com`, at the VM public IP. Forward only ports `80` and `443` from the router/firewall to the VM. Caddy will request and renew TLS certificates and reverse proxy to `rallyify-api:8000`.
 
@@ -375,6 +401,28 @@ orchestration. It returns `200` with `"ok": true` only when Valhalla `/status`
 is reachable. It returns `503` with `"ok": false` while Valhalla is starting
 or unavailable. This does not alter the public `/health` contract.
 
+### `GET /routing/graph-info`
+
+Returns non-sensitive information describing the active routing graph and the
+API's supported request values:
+
+```json
+{
+  "routingEngine": "valhalla",
+  "engineVersion": "3.5.1",
+  "graphBuildId": "uk-2026-07-20",
+  "osmDataDate": "2026-07-19",
+  "supportedVehicleProfiles": ["car", "motorbike", "caravan"],
+  "supportedRoutePriorities": [
+    "fastest", "balanced", "scenic", "avoid_motorways", "prefer_b_roads"
+  ]
+}
+```
+
+Version/build fields are `null` when neither Valhalla `/status` nor the
+corresponding environment variable provides them. Assign a graph build ID and
+OSM date during each tile-data deployment so issue reports remain reproducible.
+
 ### `POST /routes/calculate`
 
 Validates a Rallyify route request, forwards it to Valhalla's `/route` API, and returns a normalized response.
@@ -465,11 +513,111 @@ Response:
     }
   ],
   "provider": "valhalla",
-  "generatedAt": "2026-06-28T12:00:00+00:00"
+  "generatedAt": "2026-06-28T12:00:00+00:00",
+  "requestId": "8ac93dbd-83a2-46c5-a08f-78e739588606",
+  "routingMetadata": {
+    "provider": "valhalla",
+    "engineVersion": "3.5.1",
+    "graphBuildId": "uk-2026-07-20",
+    "osmDataDate": "2026-07-19",
+    "costingProfile": "auto",
+    "roadPriority": "balanced",
+    "units": "imperial",
+    "fallbackUsed": false,
+    "endpointSnaps": {
+      "start": "under_25m",
+      "destination": "25_to_100m"
+    }
+  }
 }
 ```
 
 The `polyline` field is a decoded array of `[longitude, latitude]` pairs for the current Rallyify mobile app `RouteResult` contract. `encodedPolyline` is retained as the raw Valhalla shape where available for diagnostics or future clients. The API does not return `bounds`; the app currently derives bounds from `polyline`.
+
+`requestId` and `routingMetadata` are additive fields; the established route
+fields remain unchanged. Endpoint snap distances are intentionally coarse in
+the client response. Exact values are retained only in the restricted beta
+diagnostic record.
+
+The API rejects missing/malformed geometry, non-finite or non-positive route
+metrics, missing legs, endpoint snaps over the configured limit, severe
+geometry discontinuities, and obvious start/end reversal. These checks do not
+attempt to infer one-way restrictions from geometry, and the reported one-way
+incident is not considered fixed until it is reproduced against a known graph.
+
+### `POST /route-reports`
+
+Accepts the existing Rallyify app `RouteIssueReport` envelope using a
+deployment-managed bearer token. `/routes/report` is retained as an alias for
+the flattened server contract used by API tests and tooling.
+
+```http
+Authorization: Bearer <beta-report-token>
+Content-Type: application/json
+```
+
+```json
+{
+  "id": "route_issue_example",
+  "dedupeKey": "example",
+  "category": "unnecessarilyLong",
+  "description": "Banbury to Silverstone was unexpectedly long.",
+  "diagnostics": {
+    "appVersion": "1.0.0",
+    "buildProfile": "preview",
+    "routeProvider": "rallyify_api",
+    "routingMode": "hosted",
+    "providerRequestId": "8ac93dbd-83a2-46c5-a08f-78e739588606",
+    "graphDataVersion": "uk-2026-07-20",
+    "routePreference": "fastest",
+    "vehicleProfile": "car",
+    "routeDistanceMetres": 74000,
+    "routeDurationSeconds": 5100,
+    "activeManeuverIndex": null,
+    "timestamp": "2026-07-20T12:00:00Z",
+    "coarseArea": {
+      "latitudeBand": 52.1,
+      "longitudeBand": -1.3,
+      "precision": "0.1_degree"
+    }
+  },
+  "locationConsent": false,
+  "createdAt": "2026-07-20T12:00:00Z",
+  "retryCount": 0
+}
+```
+
+App category values are `wrongWay`, `closedRoad`, `unsafeRoad`,
+`unnecessarilyLong`, `wrongEntrance`, `incorrectInstruction`, and `other`.
+They are stored under stable server-side category names. A new report returns
+`201`; an obvious duplicate from the same token, client report ID, request,
+category, and manoeuvre returns the existing report ID with `200` and
+`duplicate: true`.
+
+`consentedRouteDetails` can contain route geometry, start, destination,
+approximate incident location, and current manoeuvre only when
+`locationConsent` is `true`; otherwise it is rejected. Description is capped
+at 2,000 characters, road/direction fields have tighter limits, geometry at
+5,000 points, and the global 64 KiB request limit also applies. Client-supplied
+user IDs are rejected. The shared beta token is a controlled-beta submission
+credential, not durable per-user authentication; do not use it as an identity
+claim. Mobile builds need to provide this token through their existing report
+submission access-token hook without committing it to source control.
+
+### Beta Diagnostic Retention
+
+Successful hosted routes are stored by request ID with exact snap metrics and
+the data needed to reproduce a defect. Reports and diagnostics default to a
+14-day expiry and have no public read endpoint. The database volume must be
+restricted to deployment administrators and must not be treated as permanent
+location history.
+
+Expired rows are removed opportunistically after writes. Also schedule this
+command daily so expiry continues when report traffic is quiet:
+
+```bash
+docker compose exec -T rallyify-api python manage.py purge_route_beta_data
+```
 
 ## Valhalla Smoke Test
 

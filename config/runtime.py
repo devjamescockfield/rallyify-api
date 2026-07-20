@@ -26,6 +26,7 @@ def validate_runtime_configuration(
     debug: bool,
     secret_key_env: str | None,
     allowed_hosts_env: str | None,
+    report_tokens_env: str | None = None,
 ) -> None:
     if deployment_environment not in SUPPORTED_ENVIRONMENTS:
         supported = ", ".join(sorted(SUPPORTED_ENVIRONMENTS))
@@ -55,6 +56,19 @@ def validate_runtime_configuration(
         errors.append("ALLOWED_HOSTS must be explicitly configured")
     elif "*" in configured_hosts:
         errors.append("ALLOWED_HOSTS must not contain '*'")
+    configured_report_tokens = [
+        token.strip()
+        for token in (report_tokens_env or "").split(",")
+        if token.strip()
+    ]
+    if not configured_report_tokens or any(
+        token == "replace-with-a-long-random-beta-token" or len(token) < 32
+        for token in configured_report_tokens
+    ):
+        errors.append(
+            "ROUTE_REPORT_BEARER_TOKENS must contain non-placeholder tokens "
+            "of at least 32 characters"
+        )
 
     if errors:
         message = "; ".join(errors)

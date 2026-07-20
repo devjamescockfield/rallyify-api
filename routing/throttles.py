@@ -1,4 +1,4 @@
-from rest_framework.throttling import AnonRateThrottle
+from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 
 
 class RouteBurstThrottle(AnonRateThrottle):
@@ -7,3 +7,7 @@ class RouteBurstThrottle(AnonRateThrottle):
 
 class RouteSustainedThrottle(AnonRateThrottle):
     scope = "route_sustained"
+
+
+class RouteReportThrottle(UserRateThrottle):
+    scope = "route_report"

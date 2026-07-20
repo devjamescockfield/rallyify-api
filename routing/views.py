@@ -1,18 +1,33 @@
 import json
 import logging
 from time import perf_counter
+import uuid
 
 from django.conf import settings
 from rest_framework import status
-from rest_framework.decorators import api_view, throttle_classes
+from rest_framework.decorators import (
+    api_view,
+    authentication_classes,
+    permission_classes,
+    throttle_classes,
+)
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from routing.serializers import RouteCalculationSerializer
-from routing.throttles import RouteBurstThrottle, RouteSustainedThrottle
+from routing.authentication import BetaReportAuthentication
+from routing.diagnostics import create_route_issue_report, store_route_diagnostic
+from routing.serializers import RouteCalculationSerializer, RouteIssueReportSerializer
+from routing.throttles import (
+    RouteBurstThrottle,
+    RouteReportThrottle,
+    RouteSustainedThrottle,
+)
 from routing.valhalla import (
     InvalidValhallaResponseError,
+    RouteValidationError,
     ValhallaUnavailableError,
     calculate_route as calculate_valhalla_route,
+    get_valhalla_graph_information,
     get_valhalla_status,
 )
 
@@ -48,9 +63,15 @@ def readiness(request):
     )
 
 
+@api_view(["GET"])
+def graph_information(request):
+    return Response(get_valhalla_graph_information(probe=True))
+
+
 @api_view(["POST"])
 @throttle_classes([RouteBurstThrottle, RouteSustainedThrottle])
 def calculate_route(request):
+    request_id = str(uuid.uuid4())
     request_started = perf_counter()
     diagnostics = {}
     route_request = None
@@ -70,6 +91,7 @@ def calculate_route(request):
             diagnostics=diagnostics,
             request_started=request_started,
             route_request=request.data,
+            request_id=request_id,
         )
 
     try:
@@ -84,6 +106,20 @@ def calculate_route(request):
             diagnostics=diagnostics,
             request_started=request_started,
             route_request=route_request,
+            request_id=request_id,
+        )
+    except RouteValidationError as exc:
+        return build_route_response(
+            body={
+                "error": "Calculated route failed validation.",
+                "code": "INVALID_ROUTE_RESULT",
+                "reason": exc.reason,
+            },
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            diagnostics=diagnostics,
+            request_started=request_started,
+            route_request=route_request,
+            request_id=request_id,
         )
     except InvalidValhallaResponseError:
         return build_route_response(
@@ -95,9 +131,10 @@ def calculate_route(request):
             diagnostics=diagnostics,
             request_started=request_started,
             route_request=route_request,
+            request_id=request_id,
         )
     except Exception:
-        logger.exception("Unexpected route calculation failure")
+        logger.exception("Unexpected route calculation failure request_id=%s", request_id)
         return build_route_response(
             body={
                 "error": "An unexpected error occurred.",
@@ -107,7 +144,22 @@ def calculate_route(request):
             diagnostics=diagnostics,
             request_started=request_started,
             route_request=route_request,
+            request_id=request_id,
         )
+
+    routing_metadata = build_routing_metadata(route_request, diagnostics)
+    route["requestId"] = request_id
+    route["routingMetadata"] = routing_metadata
+    try:
+        store_route_diagnostic(
+            request_id=request_id,
+            route_request=route_request,
+            route=route,
+            routing_metadata=routing_metadata,
+            exact_diagnostics=diagnostics.get("route_validation", {}),
+        )
+    except Exception:
+        logger.exception("Route diagnostic storage failed request_id=%s", request_id)
 
     return build_route_response(
         body=route,
@@ -116,7 +168,49 @@ def calculate_route(request):
         request_started=request_started,
         route_request=route_request,
         route=route,
+        request_id=request_id,
     )
+
+
+@api_view(["POST"])
+@authentication_classes([BetaReportAuthentication])
+@permission_classes([IsAuthenticated])
+@throttle_classes([RouteReportThrottle])
+def submit_route_report(request):
+    serializer = RouteIssueReportSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    report, duplicate = create_route_issue_report(
+        validated_data=serializer.validated_data,
+        reporter_fingerprint=request.auth,
+    )
+    return Response(
+        {
+            "reportId": str(report.report_id),
+            "routeRequestId": str(report.route_request_id),
+            "duplicate": duplicate,
+            "retentionDays": settings.ROUTE_REPORT_RETENTION_DAYS,
+        },
+        status=status.HTTP_200_OK if duplicate else status.HTTP_201_CREATED,
+    )
+
+
+def build_routing_metadata(route_request: dict, diagnostics: dict) -> dict:
+    graph = get_valhalla_graph_information(probe=False)
+    validation = diagnostics.get("route_validation", {})
+    return {
+        "provider": "valhalla",
+        "engineVersion": graph["engineVersion"],
+        "graphBuildId": graph["graphBuildId"],
+        "osmDataDate": graph["osmDataDate"],
+        "costingProfile": diagnostics.get("costing_profile"),
+        "roadPriority": route_request["roadPriority"],
+        "units": route_request["units"],
+        "fallbackUsed": False,
+        "endpointSnaps": {
+            "start": validation.get("startSnapBand"),
+            "destination": validation.get("destinationSnapBand"),
+        },
+    }
 
 
 def build_route_response(
@@ -125,8 +219,11 @@ def build_route_response(
     diagnostics: dict,
     request_started: float,
     route_request,
+    request_id: str,
     route: dict | None = None,
 ) -> Response:
+    if isinstance(body, dict) and "requestId" not in body:
+        body = {**body, "requestId": request_id}
     response_started = perf_counter()
     response_size_bytes = json_response_size(body)
     response = Response(body, status=status_code)
@@ -139,8 +236,14 @@ def build_route_response(
         route_request=route_request,
         route=route,
         response_size_bytes=response_size_bytes,
+        request_id=request_id,
     )
-
+    response["X-Route-Request-ID"] = request_id
+    response["X-Request-ID"] = request_id
+    if route:
+        graph_version = route.get("routingMetadata", {}).get("graphBuildId")
+        if graph_version:
+            response["X-Rallyify-Graph-Version"] = graph_version
     return response
 
 
@@ -151,10 +254,12 @@ def log_route_metrics(
     route_request,
     route: dict | None,
     response_size_bytes: int,
+    request_id: str,
 ) -> None:
     total_ms = duration_ms(request_started)
     metrics = {
         "event": "route_calculate",
+        "request_id": request_id,
         "status_code": status_code,
         "total_ms": total_ms,
         "slow_threshold_ms": settings.ROUTE_SLOW_WARNING_MS,

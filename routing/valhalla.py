@@ -1,8 +1,14 @@
 from datetime import UTC, datetime
+import math
 from time import perf_counter
 
 from django.conf import settings
 import requests
+
+from routing.contracts import SUPPORTED_ROUTE_PRIORITIES, SUPPORTED_VEHICLE_PROFILES
+
+
+_cached_status_metadata = {}
 
 
 def get_valhalla_status() -> dict[str, object]:
@@ -30,7 +36,57 @@ def get_valhalla_status() -> dict[str, object]:
     if version:
         status["version"] = version
 
+    _cache_status_metadata(response)
+
     return status
+
+
+def get_valhalla_graph_information(*, probe: bool = True) -> dict[str, object]:
+    if probe:
+        get_valhalla_status()
+
+    engine_version = (
+        settings.VALHALLA_ENGINE_VERSION
+        or _cached_status_metadata.get("engineVersion")
+        or None
+    )
+    graph_build_id = (
+        settings.VALHALLA_GRAPH_BUILD_ID
+        or _cached_status_metadata.get("graphBuildId")
+        or None
+    )
+    osm_data_date = (
+        settings.VALHALLA_OSM_DATA_DATE
+        or _cached_status_metadata.get("osmDataDate")
+        or None
+    )
+    return {
+        "routingEngine": "valhalla",
+        "engineVersion": engine_version,
+        "graphBuildId": graph_build_id,
+        "osmDataDate": osm_data_date,
+        "supportedVehicleProfiles": SUPPORTED_VEHICLE_PROFILES,
+        "supportedRoutePriorities": SUPPORTED_ROUTE_PRIORITIES,
+    }
+
+
+def _cache_status_metadata(response: requests.Response) -> None:
+    try:
+        payload = response.json()
+    except ValueError:
+        return
+    if not isinstance(payload, dict):
+        return
+
+    version = payload.get("version") or payload.get("valhalla_version")
+    graph_build_id = payload.get("graph_build_id") or payload.get("tileset_id")
+    osm_data_date = payload.get("osm_data_date") or payload.get("source_data_date")
+    if version is not None:
+        _cached_status_metadata["engineVersion"] = str(version)
+    if graph_build_id is not None:
+        _cached_status_metadata["graphBuildId"] = str(graph_build_id)
+    if osm_data_date is not None:
+        _cached_status_metadata["osmDataDate"] = str(osm_data_date)
 
 
 def _extract_valhalla_version(response: requests.Response) -> str | None:
@@ -57,10 +113,16 @@ class InvalidValhallaResponseError(Exception):
     pass
 
 
+class RouteValidationError(InvalidValhallaResponseError):
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
 VEHICLE_COSTING = {
     "car": "auto",
     "motorbike": "motorcycle",
-    "caravan": "auto",
+    "caravan": "truck",
 }
 
 UNIT_MAPPING = {
@@ -96,6 +158,8 @@ def build_valhalla_payload(route_request: dict) -> dict:
 
 def calculate_route(route_request: dict, diagnostics: dict | None = None) -> dict:
     payload = build_valhalla_payload(route_request)
+    if diagnostics is not None:
+        diagnostics["costing_profile"] = payload["costing"]
     url = f"{settings.VALHALLA_URL.rstrip('/')}/route"
 
     try:
@@ -123,6 +187,9 @@ def calculate_route(route_request: dict, diagnostics: dict | None = None) -> dic
         valhalla_response=valhalla_response,
         original_request=route_request,
     )
+    validation_diagnostics = validate_route_response(route, route_request)
+    if diagnostics is not None:
+        diagnostics["route_validation"] = validation_diagnostics
     record_duration(diagnostics, "normalization_ms", normalization_started)
     return route
 
@@ -149,30 +216,134 @@ def normalize_valhalla_response(
         raise InvalidValhallaResponseError from exc
 
     if not isinstance(legs, list) or not legs:
-        raise InvalidValhallaResponseError
+        raise RouteValidationError("MISSING_LEGS")
 
     if trip.get("status") not in (None, 0):
         raise InvalidValhallaResponseError
 
     encoded_polyline = trip.get("shape") or legs[0].get("shape") or ""
-    polyline = _decode_route_polyline(trip, legs)
+    try:
+        polyline = _decode_route_polyline(trip, legs)
+    except InvalidValhallaResponseError as exc:
+        raise RouteValidationError("MALFORMED_GEOMETRY") from exc
+
+    try:
+        return {
+            "encodedPolyline": encoded_polyline,
+            "polyline": polyline,
+            "distanceMetres": _length_to_metres(
+                summary["length"],
+                original_request["units"],
+            ),
+            "durationSeconds": _duration_to_seconds(summary["time"]),
+            "legs": [
+                _normalize_leg(leg, original_request["units"])
+                for leg in legs
+            ],
+            "waypoints": original_request["waypoints"],
+            "provider": "valhalla",
+            "generatedAt": datetime.now(UTC).isoformat(),
+        }
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise RouteValidationError("NON_FINITE_OR_MALFORMED_METRICS") from exc
+
+
+def validate_route_response(route: dict, original_request: dict) -> dict:
+    polyline = route.get("polyline")
+    if not isinstance(polyline, list) or len(polyline) < 2:
+        raise RouteValidationError("MALFORMED_GEOMETRY")
+    if not _is_finite_positive(route.get("distanceMetres")):
+        raise RouteValidationError("NON_FINITE_DISTANCE")
+    if not _is_finite_positive(route.get("durationSeconds")):
+        raise RouteValidationError("NON_FINITE_DURATION")
+    if not isinstance(route.get("legs"), list) or not route["legs"]:
+        raise RouteValidationError("MISSING_LEGS")
+
+    try:
+        start = original_request["waypoints"][0]
+        destination = original_request["waypoints"][-1]
+        route_start = {"longitude": polyline[0][0], "latitude": polyline[0][1]}
+        route_end = {"longitude": polyline[-1][0], "latitude": polyline[-1][1]}
+    except (IndexError, KeyError, TypeError) as exc:
+        raise RouteValidationError("MALFORMED_GEOMETRY") from exc
+
+    try:
+        start_snap_metres = _haversine_metres(start, route_start)
+        destination_snap_metres = _haversine_metres(destination, route_end)
+        reversed_start_metres = _haversine_metres(destination, route_start)
+        reversed_destination_metres = _haversine_metres(start, route_end)
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise RouteValidationError("MALFORMED_GEOMETRY") from exc
+
+    if (
+        reversed_start_metres < start_snap_metres
+        and reversed_destination_metres < destination_snap_metres
+        and reversed_start_metres + reversed_destination_metres
+        < (start_snap_metres + destination_snap_metres) * 0.5
+    ):
+        raise RouteValidationError("START_END_REVERSED")
+
+    if (
+        start_snap_metres > settings.ROUTE_MAX_ENDPOINT_SNAP_METRES
+        or destination_snap_metres > settings.ROUTE_MAX_ENDPOINT_SNAP_METRES
+    ):
+        raise RouteValidationError("ENDPOINT_SNAP_TOO_DISTANT")
+
+    maximum_gap_metres = 0.0
+    for first, second in zip(polyline, polyline[1:]):
+        try:
+            gap_metres = _haversine_metres(
+                {"longitude": first[0], "latitude": first[1]},
+                {"longitude": second[0], "latitude": second[1]},
+            )
+        except (IndexError, TypeError, ValueError, OverflowError) as exc:
+            raise RouteValidationError("MALFORMED_GEOMETRY") from exc
+        maximum_gap_metres = max(maximum_gap_metres, gap_metres)
+        if gap_metres > settings.ROUTE_MAX_GEOMETRY_GAP_METRES:
+            raise RouteValidationError("SEVERE_GEOMETRY_DISCONTINUITY")
 
     return {
-        "encodedPolyline": encoded_polyline,
-        "polyline": polyline,
-        "distanceMetres": _length_to_metres(
-            summary["length"],
-            original_request["units"],
-        ),
-        "durationSeconds": _duration_to_seconds(summary["time"]),
-        "legs": [
-            _normalize_leg(leg, original_request["units"])
-            for leg in legs
-        ],
-        "waypoints": original_request["waypoints"],
-        "provider": "valhalla",
-        "generatedAt": datetime.now(UTC).isoformat(),
+        "startSnapMetres": round(start_snap_metres, 2),
+        "destinationSnapMetres": round(destination_snap_metres, 2),
+        "maximumGeometryGapMetres": round(maximum_gap_metres, 2),
+        "startSnapBand": _snap_distance_band(start_snap_metres),
+        "destinationSnapBand": _snap_distance_band(destination_snap_metres),
     }
+
+
+def _is_finite_positive(value) -> bool:
+    return isinstance(value, int | float) and math.isfinite(value) and value > 0
+
+
+def _snap_distance_band(distance_metres: float) -> str:
+    if distance_metres < 25:
+        return "under_25m"
+    if distance_metres < 100:
+        return "25_to_100m"
+    if distance_metres < 500:
+        return "100_to_500m"
+    if distance_metres < 2000:
+        return "500m_to_2km"
+    if distance_metres < 5000:
+        return "2_to_5km"
+    return "over_5km"
+
+
+def _haversine_metres(first: dict, second: dict) -> float:
+    first_latitude = math.radians(float(first["latitude"]))
+    second_latitude = math.radians(float(second["latitude"]))
+    latitude_delta = second_latitude - first_latitude
+    longitude_delta = math.radians(
+        float(second["longitude"]) - float(first["longitude"])
+    )
+    haversine = (
+        math.sin(latitude_delta / 2) ** 2
+        + math.cos(first_latitude)
+        * math.cos(second_latitude)
+        * math.sin(longitude_delta / 2) ** 2
+    )
+    haversine = min(1.0, max(0.0, haversine))
+    return 6_371_000 * 2 * math.atan2(math.sqrt(haversine), math.sqrt(1 - haversine))
 
 
 def _build_location(waypoint: dict) -> dict:
@@ -318,8 +489,14 @@ def _decode_polyline_value(encoded: str, index: int) -> tuple[int, int]:
 
 
 def _length_to_metres(length: int | float, units: str) -> int:
-    return round(float(length) * DISTANCE_FACTORS_TO_METRES[units])
+    value = float(length) * DISTANCE_FACTORS_TO_METRES[units]
+    if not math.isfinite(value):
+        raise RouteValidationError("NON_FINITE_DISTANCE")
+    return round(value)
 
 
 def _duration_to_seconds(duration: int | float) -> int:
-    return round(float(duration))
+    value = float(duration)
+    if not math.isfinite(value):
+        raise RouteValidationError("NON_FINITE_DURATION")
+    return round(value)

@@ -16,6 +16,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DEPLOYMENT_ENV = os.getenv("DEPLOYMENT_ENV", "development").strip().lower()
 SECRET_KEY_ENV = os.getenv("SECRET_KEY")
 ALLOWED_HOSTS_ENV = os.getenv("ALLOWED_HOSTS")
+ROUTE_REPORT_BEARER_TOKENS_ENV = os.getenv("ROUTE_REPORT_BEARER_TOKENS")
 
 SECRET_KEY = SECRET_KEY_ENV or DEVELOPMENT_SECRET_KEY
 DEBUG = parse_boolean_environment_variable(
@@ -36,6 +37,7 @@ validate_runtime_configuration(
     debug=DEBUG,
     secret_key_env=SECRET_KEY_ENV,
     allowed_hosts_env=ALLOWED_HOSTS_ENV,
+    report_tokens_env=ROUTE_REPORT_BEARER_TOKENS_ENV,
 )
 
 INSTALLED_APPS = [
@@ -80,7 +82,7 @@ WSGI_APPLICATION = "config.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+        "NAME": os.getenv("DATABASE_PATH", BASE_DIR / "db.sqlite3"),
     }
 }
 
@@ -102,6 +104,7 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "route_burst": os.getenv("ROUTE_RATE_LIMIT_BURST", "30/minute"),
         "route_sustained": os.getenv("ROUTE_RATE_LIMIT_SUSTAINED", "500/day"),
+        "route_report": os.getenv("ROUTE_REPORT_RATE_LIMIT", "10/hour"),
     },
     # Caddy is the single trusted proxy in the staging Compose deployment.
     "NUM_PROXIES": 1,
@@ -117,3 +120,23 @@ VALHALLA_HEALTH_TIMEOUT_SECONDS = float(
     os.getenv("VALHALLA_HEALTH_TIMEOUT_SECONDS", "1")
 )
 ROUTE_SLOW_WARNING_MS = float(os.getenv("ROUTE_SLOW_WARNING_MS", "1500"))
+VALHALLA_ENGINE_VERSION = os.getenv("VALHALLA_ENGINE_VERSION", "")
+VALHALLA_GRAPH_BUILD_ID = os.getenv("VALHALLA_GRAPH_BUILD_ID", "")
+VALHALLA_OSM_DATA_DATE = os.getenv("VALHALLA_OSM_DATA_DATE", "")
+ROUTE_MAX_ENDPOINT_SNAP_METRES = float(
+    os.getenv("ROUTE_MAX_ENDPOINT_SNAP_METRES", "5000")
+)
+ROUTE_MAX_GEOMETRY_GAP_METRES = float(
+    os.getenv("ROUTE_MAX_GEOMETRY_GAP_METRES", "100000")
+)
+ROUTE_DIAGNOSTIC_RETENTION_DAYS = int(
+    os.getenv("ROUTE_DIAGNOSTIC_RETENTION_DAYS", "14")
+)
+ROUTE_REPORT_RETENTION_DAYS = int(
+    os.getenv("ROUTE_REPORT_RETENTION_DAYS", "14")
+)
+ROUTE_REPORT_BEARER_TOKENS = [
+    token.strip()
+    for token in (ROUTE_REPORT_BEARER_TOKENS_ENV or "").split(",")
+    if token.strip()
+]
