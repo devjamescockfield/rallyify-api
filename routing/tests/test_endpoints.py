@@ -106,8 +106,12 @@ def mock_valhalla_post(monkeypatch):
 @pytest.fixture(autouse=True)
 def clear_throttle_cache():
     cache.clear()
+    from routing.valhalla import _cached_status_metadata
+
+    _cached_status_metadata.clear()
     yield
     cache.clear()
+    _cached_status_metadata.clear()
 
 
 def test_health_returns_200_when_valhalla_unavailable(client, monkeypatch):
@@ -180,6 +184,103 @@ def test_graph_information_returns_engine_graph_and_supported_contract(
         "osmDataDate": "2026-07-19",
         "supportedVehicleProfiles": ["car", "motorbike", "caravan"],
         "supportedRoutePriorities": [
+            "fastest",
+            "balanced",
+            "scenic",
+            "avoid_motorways",
+            "prefer_b_roads",
+        ],
+    }
+
+
+@override_settings(
+    VALHALLA_ENGINE_VERSION="3.5.1",
+    VALHALLA_GRAPH_BUILD_ID="configured-build",
+    VALHALLA_OSM_DATA_DATE="2026-07-18",
+)
+def test_live_valhalla_metadata_overrides_stale_engine_configuration(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "routing.valhalla.requests.get",
+        lambda url, timeout: MockValhallaStatusResponse(
+            payload={
+                "version": "3.7.0-d37aa595e",
+                "graph_build_id": "live-uk-build",
+                "osm_data_date": "2026-07-19",
+            }
+        ),
+    )
+
+    response = client.get("/routing/graph-info")
+
+    assert response.status_code == 200
+    assert response.json()["engineVersion"] == "3.7.0-d37aa595e"
+    assert response.json()["graphBuildId"] == "live-uk-build"
+    assert response.json()["osmDataDate"] == "2026-07-19"
+
+
+@override_settings(
+    VALHALLA_ENGINE_VERSION="3.5.1",
+    VALHALLA_GRAPH_BUILD_ID="configured-build",
+    VALHALLA_OSM_DATA_DATE="2026-07-18",
+)
+def test_route_and_graph_info_use_the_same_live_metadata(
+    client,
+    monkeypatch,
+    mock_valhalla_post,
+):
+    status_payload = {
+        "version": "3.7.0-d37aa595e",
+        "graph_build_id": "live-uk-build",
+        "osm_data_date": "2026-07-19",
+    }
+    monkeypatch.setattr(
+        "routing.valhalla.requests.get",
+        lambda url, timeout: MockValhallaStatusResponse(payload=status_payload),
+    )
+
+    route = client.post(
+        "/routes/calculate",
+        data=VALID_ROUTE_REQUEST,
+        content_type="application/json",
+    )
+    graph = client.get("/routing/graph-info")
+
+    assert route.status_code == 200
+    assert route.json()["routingMetadata"]["engineVersion"] == graph.json()[
+        "engineVersion"
+    ]
+    assert route.json()["routingMetadata"]["graphBuildId"] == graph.json()[
+        "graphBuildId"
+    ]
+    assert route.json()["routingMetadata"]["osmDataDate"] == graph.json()[
+        "osmDataDate"
+    ]
+
+
+@override_settings(
+    VALHALLA_ENGINE_VERSION="3.7.0-test",
+    VALHALLA_GRAPH_BUILD_ID="uk-2026-07-20",
+    VALHALLA_OSM_DATA_DATE="2026-07-19",
+    ROUTING_BUILD_DATE="2026-07-20",
+)
+def test_routing_information_returns_safe_public_metadata(client, monkeypatch):
+    monkeypatch.setattr(
+        "routing.valhalla.requests.get",
+        lambda url, timeout: MockValhallaStatusResponse(),
+    )
+    response = client.get("/routing/info")
+    assert response.status_code == 200
+    assert response.json() == {
+        "provider": "valhalla",
+        "providerVersion": "3.7.0-test",
+        "graphVersion": "uk-2026-07-20",
+        "dataVersion": "2026-07-19",
+        "buildDate": "2026-07-20",
+        "supportedProfiles": ["car", "motorbike", "caravan"],
+        "supportedPriorities": [
             "fastest",
             "balanced",
             "scenic",
@@ -637,10 +738,16 @@ def test_successful_response_returns_normalized_route(client, mock_valhalla_post
         "requestId": request_id,
         "routingMetadata": {
             "provider": "valhalla",
+            "apiVersion": "beta",
+            "providerVersion": "3.7.0-test",
             "engineVersion": "3.7.0-test",
+            "graphVersion": "uk-2026-07-20",
             "graphBuildId": "uk-2026-07-20",
+            "dataVersion": "2026-07-19",
             "osmDataDate": "2026-07-19",
+            "buildDate": None,
             "costingProfile": "auto",
+            "vehicleProfile": "car",
             "roadPriority": "balanced",
             "units": "imperial",
             "fallbackUsed": False,
@@ -653,8 +760,18 @@ def test_successful_response_returns_normalized_route(client, mock_valhalla_post
     assert body["generatedAt"]
 
     diagnostic = RouteDiagnostic.objects.get(request_id=request_id)
-    assert diagnostic.exact_diagnostics["startSnapMetres"] == 0
-    assert diagnostic.exact_diagnostics["destinationSnapMetres"] == 0
+    assert diagnostic.vehicle_profile == "car"
+    assert diagnostic.waypoint_count == 2
+    assert diagnostic.response_summary["endpointSnaps"] == {
+        "start": "under_25m",
+        "destination": "under_25m",
+    }
+    assert "request_payload" not in {
+        field.name for field in RouteDiagnostic._meta.fields
+    }
+    assert "route_payload" not in {
+        field.name for field in RouteDiagnostic._meta.fields
+    }
     assert "startSnapMetres" not in body["routingMetadata"]["endpointSnaps"]
 
 

@@ -55,13 +55,25 @@ to start until both values are replaced.
 | `DEBUG` | `true` | Enables Django debug mode for local development. Use `false` for staging. |
 | `SECRET_KEY` | Dev fallback | Django secret key. Set a real value outside local development. |
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1,0.0.0.0` | Comma-separated Django allowed hosts. |
+| `SECURE_HSTS_SECONDS` | `3600` in protected deployments | HSTS lifetime; increase only after validating the HTTPS deployment. |
 | `REQUEST_BODY_MAX_BYTES` | `65536` | Maximum request body size accepted by Django (64 KiB). |
 | `ROUTE_RATE_LIMIT_BURST` | `30/minute` | Per-client-IP burst limit for `POST /routes/calculate`. |
 | `ROUTE_RATE_LIMIT_SUSTAINED` | `500/day` | Per-client-IP sustained limit for `POST /routes/calculate`. |
-| `ROUTE_REPORT_RATE_LIMIT` | `10/hour` | Per beta-token throttle for `POST /routes/report`. |
-| `ROUTE_REPORT_BEARER_TOKENS` | none | Comma-separated beta report tokens. Protected deployments require tokens of at least 32 characters. |
+| `ROUTE_REPORT_USER_BURST_RATE` | `5/minute` | Per-authenticated-user report burst limit. |
+| `ROUTE_REPORT_USER_HOURLY_RATE` | `20/hour` | Per-authenticated-user report hourly limit. |
+| `ROUTE_REPORT_USER_DAILY_RATE` | `25/day` | Per-authenticated-user report daily limit. |
+| `ROUTE_REPORT_IP_RATE` | `100/hour` | Secondary per-client-IP report limit. |
+| `ROUTE_REPORT_IP_DAILY_RATE` | `100/day` | Per-client-IP report daily limit. |
+| `ROUTE_REPORT_GLOBAL_RATE` | disabled | Optional global report safety limit. |
 | `ROUTE_DIAGNOSTIC_RETENTION_DAYS` | `14` | Retention for restricted route diagnostics. |
-| `ROUTE_REPORT_RETENTION_DAYS` | `14` | Retention for route-quality reports. |
+| `ROUTE_REPORT_EXACT_RETENTION_DAYS` | `30` | Retention for explicitly consented exact route details, except active investigations. |
+| `ROUTE_REPORT_SUMMARY_RETENTION_DAYS` | `90` | Retention for report summaries. |
+| `SUPABASE_URL` | none | HTTPS Supabase project URL used to validate the token issuer. |
+| `SUPABASE_JWT_ISSUER` | `${SUPABASE_URL}/auth/v1` | Exact accepted access-token issuer. |
+| `SUPABASE_JWKS_CACHE_SECONDS` | `600` | Per-worker public-key-set cache lifetime, capped at 10 minutes. |
+| `SUPABASE_JWKS_TIMEOUT_SECONDS` | `3` | Timeout for refreshing Supabase public signing keys. |
+| `SUPABASE_JWT_LEEWAY_SECONDS` | `30` | Small JWT clock-skew allowance. |
+| `SQLITE_BUSY_TIMEOUT_MS` | `5000` | SQLite lock wait used with WAL mode. |
 | `ROUTE_MAX_ENDPOINT_SNAP_METRES` | `5000` | Maximum accepted start or destination snap distance. |
 | `ROUTE_MAX_GEOMETRY_GAP_METRES` | `100000` | Maximum accepted gap between adjacent decoded geometry points. |
 | `VALHALLA_URL` | `http://localhost:8002` | Base URL for the Valhalla service. |
@@ -129,10 +141,17 @@ VALHALLA_HEALTH_TIMEOUT_SECONDS=1
 REQUEST_BODY_MAX_BYTES=65536
 ROUTE_RATE_LIMIT_BURST=30/minute
 ROUTE_RATE_LIMIT_SUSTAINED=500/day
-ROUTE_REPORT_RATE_LIMIT=10/hour
-ROUTE_REPORT_BEARER_TOKENS=<generate-a-separate-long-random-value>
+ROUTE_REPORT_USER_BURST_RATE=5/minute
+ROUTE_REPORT_USER_HOURLY_RATE=20/hour
+ROUTE_REPORT_USER_DAILY_RATE=25/day
+ROUTE_REPORT_IP_RATE=100/hour
+ROUTE_REPORT_IP_DAILY_RATE=100/day
+ROUTE_REPORT_GLOBAL_RATE=
 ROUTE_DIAGNOSTIC_RETENTION_DAYS=14
-ROUTE_REPORT_RETENTION_DAYS=14
+ROUTE_REPORT_EXACT_RETENTION_DAYS=30
+ROUTE_REPORT_SUMMARY_RETENTION_DAYS=90
+SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+SUPABASE_JWT_ISSUER=https://YOUR_PROJECT.supabase.co/auth/v1
 VALHALLA_GRAPH_BUILD_ID=uk-<build-date-or-release-id>
 VALHALLA_OSM_DATA_DATE=<source-data-date>
 RALLYIFY_API_BASE_URL=https://api-dev.example.com
@@ -147,8 +166,8 @@ python -c 'import secrets; print(secrets.token_urlsafe(64))'
 For `staging` and `production`, Django refuses to start if `DEBUG` is true,
 `SECRET_KEY` is missing or still uses a documented placeholder,
 `ALLOWED_HOSTS` is missing or contains `*`, or the deployment environment is
-unknown. Protected startup also requires at least one non-placeholder beta
-report token of 32 or more characters.
+unknown. Protected startup also requires an HTTPS `SUPABASE_URL` and an issuer
+that exactly matches `${SUPABASE_URL}/auth/v1`.
 
 The container runs `python manage.py migrate --noinput` before Gunicorn starts.
 Compose persists the SQLite diagnostic/report database in the
@@ -387,7 +406,7 @@ Returns service health without failing when Valhalla is unavailable.
   "valhalla": {
     "configured": true,
     "reachable": true,
-    "version": "3.5.1"
+    "version": "3.7.0-d37aa595e"
   }
 }
 ```
@@ -409,7 +428,7 @@ API's supported request values:
 ```json
 {
   "routingEngine": "valhalla",
-  "engineVersion": "3.5.1",
+  "engineVersion": "3.7.0-d37aa595e",
   "graphBuildId": "uk-2026-07-20",
   "osmDataDate": "2026-07-19",
   "supportedVehicleProfiles": ["car", "motorbike", "caravan"],
@@ -422,6 +441,9 @@ API's supported request values:
 Version/build fields are `null` when neither Valhalla `/status` nor the
 corresponding environment variable provides them. Assign a graph build ID and
 OSM date during each tile-data deployment so issue reports remain reproducible.
+Live `/status` metadata takes precedence over configured fallback values. A
+warning is logged when `VALHALLA_ENGINE_VERSION` contradicts the live engine,
+and staging checks warn when graph build ID or OSM date is absent.
 
 ### `POST /routes/calculate`
 
@@ -517,7 +539,7 @@ Response:
   "requestId": "8ac93dbd-83a2-46c5-a08f-78e739588606",
   "routingMetadata": {
     "provider": "valhalla",
-    "engineVersion": "3.5.1",
+    "engineVersion": "3.7.0-d37aa595e",
     "graphBuildId": "uk-2026-07-20",
     "osmDataDate": "2026-07-19",
     "costingProfile": "auto",
@@ -535,9 +557,11 @@ Response:
 The `polyline` field is a decoded array of `[longitude, latitude]` pairs for the current Rallyify mobile app `RouteResult` contract. `encodedPolyline` is retained as the raw Valhalla shape where available for diagnostics or future clients. The API does not return `bounds`; the app currently derives bounds from `polyline`.
 
 `requestId` and `routingMetadata` are additive fields; the established route
-fields remain unchanged. Endpoint snap distances are intentionally coarse in
-the client response. Exact values are retained only in the restricted beta
-diagnostic record.
+fields remain unchanged. Routing metadata includes API/provider versions,
+graph and data identifiers, costing/profile/priority/units, and fallback state.
+Endpoint snap distances are intentionally coarse. Short-lived server
+diagnostics retain only counts, timing/result summaries, and coarse snap bands;
+they do not retain request coordinates or route geometry.
 
 The API rejects missing/malformed geometry, non-finite or non-positive route
 metrics, missing legs, endpoint snaps over the configured limit, severe
@@ -547,12 +571,14 @@ incident is not considered fixed until it is reproduced against a known graph.
 
 ### `POST /route-reports`
 
-Accepts the existing Rallyify app `RouteIssueReport` envelope using a
-deployment-managed bearer token. `/routes/report` is retained as an alias for
-the flattened server contract used by API tests and tooling.
+Accepts the Rallyify app `RouteIssueReport` envelope. The bearer token must be
+a valid, unexpired Supabase user access token; issuer, audience, signature and
+subject are verified against Supabase public JWKS. The report owner is always
+derived from the verified `sub` claim. `/routes/report` remains an alias.
 
 ```http
-Authorization: Bearer <beta-report-token>
+Authorization: Bearer <supabase-access-token>
+Idempotency-Key: route_issue_example
 Content-Type: application/json
 ```
 
@@ -590,34 +616,61 @@ Content-Type: application/json
 App category values are `wrongWay`, `closedRoad`, `unsafeRoad`,
 `unnecessarilyLong`, `wrongEntrance`, `incorrectInstruction`, and `other`.
 They are stored under stable server-side category names. A new report returns
-`201`; an obvious duplicate from the same token, client report ID, request,
-category, and manoeuvre returns the existing report ID with `200` and
-`duplicate: true`.
+`201`. An identical retry for the same authenticated user and idempotency key
+returns the original report with `409`, `status: "accepted"`, and
+`duplicate: true`. Reusing the key for materially different content is
+rejected with `422`, which the mobile queue does not treat as accepted.
 
 `consentedRouteDetails` can contain route geometry, start, destination,
 approximate incident location, and current manoeuvre only when
 `locationConsent` is `true`; otherwise it is rejected. Description is capped
-at 2,000 characters, road/direction fields have tighter limits, geometry at
-5,000 points, and the global 64 KiB request limit also applies. Client-supplied
-user IDs are rejected. The shared beta token is a controlled-beta submission
-credential, not durable per-user authentication; do not use it as an identity
-claim. Mobile builds need to provide this token through their existing report
-submission access-token hook without committing it to source control.
+at 500 characters, road/direction fields have tighter limits, geometry at
+5,000 points, and the global 64 KiB request limit also applies. Unknown nested
+fields are rejected. Client-supplied user IDs are ignored. Screenshot upload
+is not supported by this endpoint yet; preview testers can use the app's
+redacted structured export alongside a separately shared screenshot.
 
 ### Beta Diagnostic Retention
 
-Successful hosted routes are stored by request ID with exact snap metrics and
-the data needed to reproduce a defect. Reports and diagnostics default to a
-14-day expiry and have no public read endpoint. The database volume must be
-restricted to deployment administrators and must not be treated as permanent
-location history.
+Successful hosted routes have a 14-day request-ID diagnostic containing only
+non-location summaries. Report summaries expire after 90 days. Exact geometry,
+endpoints, incident location and manoeuvre details are stored only after
+explicit consent and purged after 30 days unless the report is actively marked
+`investigating`. There is no public report read endpoint.
 
-Expired rows are removed opportunistically after writes. Also schedule this
-command daily so expiry continues when report traffic is quiet:
+Schedule this command daily. Retention cleanup is deliberately kept out of the
+request path so concurrent report submissions do not contend with table-wide
+deletes:
 
 ```bash
 docker compose exec -T rallyify-api python manage.py purge_route_beta_data
 ```
+
+The default Django throttle cache is process-local, so limits are approximate
+across multiple Gunicorn workers. Configure a shared Redis-backed Django cache
+before opening this endpoint beyond controlled beta testing. Access to Django
+admin must be limited to authorised staff; reviewers can change status and
+internal notes without exposing reporter email addresses.
+
+Supabase user tokens are verified locally against the project's asymmetric
+public keys at `${SUPABASE_JWT_ISSUER}/.well-known/jwks.json`. The key set is
+cached in each Gunicorn worker for up to 10 minutes and refreshed for unknown
+key IDs, so Supabase is not called for every report. Signature, expiry, issuer,
+configured audience and UUID `sub` are validated. The service does not accept
+shared beta tokens, JWT secrets or service-role keys for this endpoint. See
+the [Supabase JWT verification documentation](https://supabase.com/docs/guides/auth/jwts)
+for signing-key rotation timing.
+
+SQLite connections use WAL mode, `synchronous=NORMAL`, and a 5-second busy
+timeout by default. Report creation keeps only the individual insert inside a
+transaction. This is appropriate for the controlled beta load, but migrate
+report/diagnostic storage to PostgreSQL before a wider external beta or any
+multi-VM deployment.
+
+### `GET /routing/info`
+
+Returns safe provider, graph/data/build identifiers and supported profile and
+priority lists. It exposes no credentials, routes, coordinates or user data.
 
 ## Valhalla Smoke Test
 

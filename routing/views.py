@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from time import perf_counter
 import uuid
 
@@ -14,12 +15,21 @@ from rest_framework.decorators import (
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from routing.authentication import BetaReportAuthentication
-from routing.diagnostics import create_route_issue_report, store_route_diagnostic
+from routing.authentication import SupabaseJWTAuthentication
+from routing.diagnostics import (
+    IdempotencyKeyConflict,
+    create_route_issue_report,
+    store_route_diagnostic,
+)
 from routing.serializers import RouteCalculationSerializer, RouteIssueReportSerializer
 from routing.throttles import (
     RouteBurstThrottle,
-    RouteReportThrottle,
+    RouteReportGlobalThrottle,
+    RouteReportIPThrottle,
+    RouteReportIPDailyThrottle,
+    RouteReportUserBurstThrottle,
+    RouteReportUserHourlyThrottle,
+    RouteReportUserDailyThrottle,
     RouteSustainedThrottle,
 )
 from routing.valhalla import (
@@ -66,6 +76,22 @@ def readiness(request):
 @api_view(["GET"])
 def graph_information(request):
     return Response(get_valhalla_graph_information(probe=True))
+
+
+@api_view(["GET"])
+def routing_information(request):
+    graph = get_valhalla_graph_information(probe=True)
+    return Response(
+        {
+            "provider": "valhalla",
+            "providerVersion": graph["engineVersion"],
+            "graphVersion": graph["graphBuildId"],
+            "dataVersion": graph["osmDataDate"],
+            "buildDate": settings.ROUTING_BUILD_DATE or None,
+            "supportedProfiles": graph["supportedVehicleProfiles"],
+            "supportedPriorities": graph["supportedRoutePriorities"],
+        }
+    )
 
 
 @api_view(["POST"])
@@ -156,7 +182,6 @@ def calculate_route(request):
             route_request=route_request,
             route=route,
             routing_metadata=routing_metadata,
-            exact_diagnostics=diagnostics.get("route_validation", {}),
         )
     except Exception:
         logger.exception("Route diagnostic storage failed request_id=%s", request_id)
@@ -173,36 +198,70 @@ def calculate_route(request):
 
 
 @api_view(["POST"])
-@authentication_classes([BetaReportAuthentication])
+@authentication_classes([SupabaseJWTAuthentication])
 @permission_classes([IsAuthenticated])
-@throttle_classes([RouteReportThrottle])
+@throttle_classes(
+    [
+        RouteReportUserBurstThrottle,
+        RouteReportUserHourlyThrottle,
+        RouteReportUserDailyThrottle,
+        RouteReportIPThrottle,
+        RouteReportIPDailyThrottle,
+        RouteReportGlobalThrottle,
+    ]
+)
 def submit_route_report(request):
+    idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,100}", idempotency_key):
+        return Response(
+            {
+                "error": "A valid Idempotency-Key header is required.",
+                "code": "INVALID_IDEMPOTENCY_KEY",
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     serializer = RouteIssueReportSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
-    report, duplicate = create_route_issue_report(
-        validated_data=serializer.validated_data,
-        reporter_fingerprint=request.auth,
-    )
+    try:
+        report, duplicate = create_route_issue_report(
+            validated_data=serializer.validated_data,
+            reporter_id=uuid.UUID(request.user.subject),
+            idempotency_key=idempotency_key,
+        )
+    except IdempotencyKeyConflict:
+        return Response(
+            {
+                "error": "Idempotency key was already used for another report.",
+                "code": "IDEMPOTENCY_KEY_REUSED",
+            },
+            status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
     return Response(
         {
             "reportId": str(report.report_id),
-            "routeRequestId": str(report.route_request_id),
+            "status": "accepted",
+            "receivedAt": report.created_at.isoformat(),
             "duplicate": duplicate,
-            "retentionDays": settings.ROUTE_REPORT_RETENTION_DAYS,
         },
-        status=status.HTTP_200_OK if duplicate else status.HTTP_201_CREATED,
+        status=status.HTTP_409_CONFLICT if duplicate else status.HTTP_201_CREATED,
     )
 
 
 def build_routing_metadata(route_request: dict, diagnostics: dict) -> dict:
-    graph = get_valhalla_graph_information(probe=False)
+    graph = get_valhalla_graph_information(probe=True)
     validation = diagnostics.get("route_validation", {})
     return {
         "provider": "valhalla",
+        "apiVersion": settings.RALLYIFY_API_VERSION,
+        "providerVersion": graph["engineVersion"],
         "engineVersion": graph["engineVersion"],
+        "graphVersion": graph["graphBuildId"],
         "graphBuildId": graph["graphBuildId"],
+        "dataVersion": graph["osmDataDate"],
         "osmDataDate": graph["osmDataDate"],
+        "buildDate": settings.ROUTING_BUILD_DATE or None,
         "costingProfile": diagnostics.get("costing_profile"),
+        "vehicleProfile": route_request["vehicleProfile"],
         "roadPriority": route_request["roadPriority"],
         "units": route_request["units"],
         "fallbackUsed": False,

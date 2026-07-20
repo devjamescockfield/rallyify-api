@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+import logging
 import math
 from time import perf_counter
 
@@ -9,6 +10,7 @@ from routing.contracts import SUPPORTED_ROUTE_PRIORITIES, SUPPORTED_VEHICLE_PROF
 
 
 _cached_status_metadata = {}
+logger = logging.getLogger(__name__)
 
 
 def get_valhalla_status() -> dict[str, object]:
@@ -45,19 +47,26 @@ def get_valhalla_graph_information(*, probe: bool = True) -> dict[str, object]:
     if probe:
         get_valhalla_status()
 
-    engine_version = (
-        settings.VALHALLA_ENGINE_VERSION
-        or _cached_status_metadata.get("engineVersion")
-        or None
-    )
+    live_engine_version = _cached_status_metadata.get("engineVersion")
+    if (
+        live_engine_version
+        and settings.VALHALLA_ENGINE_VERSION
+        and live_engine_version != settings.VALHALLA_ENGINE_VERSION
+    ):
+        logger.warning(
+            "routing_metadata_mismatch field=engineVersion configured=%s live=%s",
+            settings.VALHALLA_ENGINE_VERSION,
+            live_engine_version,
+        )
+    engine_version = live_engine_version or settings.VALHALLA_ENGINE_VERSION or None
     graph_build_id = (
-        settings.VALHALLA_GRAPH_BUILD_ID
-        or _cached_status_metadata.get("graphBuildId")
+        _cached_status_metadata.get("graphBuildId")
+        or settings.VALHALLA_GRAPH_BUILD_ID
         or None
     )
     osm_data_date = (
-        settings.VALHALLA_OSM_DATA_DATE
-        or _cached_status_metadata.get("osmDataDate")
+        _cached_status_metadata.get("osmDataDate")
+        or settings.VALHALLA_OSM_DATA_DATE
         or None
     )
     return {

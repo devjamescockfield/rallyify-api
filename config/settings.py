@@ -16,7 +16,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DEPLOYMENT_ENV = os.getenv("DEPLOYMENT_ENV", "development").strip().lower()
 SECRET_KEY_ENV = os.getenv("SECRET_KEY")
 ALLOWED_HOSTS_ENV = os.getenv("ALLOWED_HOSTS")
-ROUTE_REPORT_BEARER_TOKENS_ENV = os.getenv("ROUTE_REPORT_BEARER_TOKENS")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_JWT_ISSUER = (
+    os.getenv("SUPABASE_JWT_ISSUER")
+    or (f"{SUPABASE_URL}/auth/v1" if SUPABASE_URL else "")
+).strip().rstrip("/")
 
 SECRET_KEY = SECRET_KEY_ENV or DEVELOPMENT_SECRET_KEY
 DEBUG = parse_boolean_environment_variable(
@@ -32,15 +36,32 @@ ALLOWED_HOSTS = [
     if host.strip()
 ]
 
+IS_PROTECTED_DEPLOYMENT = DEPLOYMENT_ENV in {"staging", "production"}
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SESSION_COOKIE_SECURE = IS_PROTECTED_DEPLOYMENT
+CSRF_COOKIE_SECURE = IS_PROTECTED_DEPLOYMENT
+SECURE_HSTS_SECONDS = (
+    int(os.getenv("SECURE_HSTS_SECONDS", "3600"))
+    if IS_PROTECTED_DEPLOYMENT
+    else 0
+)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+SECURE_HSTS_PRELOAD = False
+# Caddy owns HTTP-to-HTTPS redirects; enabling Django redirects would break
+# the container's private HTTP readiness probe.
+SECURE_SSL_REDIRECT = False
+
 validate_runtime_configuration(
     deployment_environment=DEPLOYMENT_ENV,
     debug=DEBUG,
     secret_key_env=SECRET_KEY_ENV,
     allowed_hosts_env=ALLOWED_HOSTS_ENV,
-    report_tokens_env=ROUTE_REPORT_BEARER_TOKENS_ENV,
+    supabase_url=SUPABASE_URL,
+    supabase_jwt_issuer=SUPABASE_JWT_ISSUER,
 )
 
 INSTALLED_APPS = [
+    "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
@@ -83,6 +104,9 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": os.getenv("DATABASE_PATH", BASE_DIR / "db.sqlite3"),
+        "OPTIONS": {
+            "timeout": int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "5000")) / 1000,
+        },
     }
 }
 
@@ -104,7 +128,20 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "route_burst": os.getenv("ROUTE_RATE_LIMIT_BURST", "30/minute"),
         "route_sustained": os.getenv("ROUTE_RATE_LIMIT_SUSTAINED", "500/day"),
-        "route_report": os.getenv("ROUTE_REPORT_RATE_LIMIT", "10/hour"),
+        "route_report_user_burst": os.getenv(
+            "ROUTE_REPORT_USER_BURST_RATE", "5/minute"
+        ),
+        "route_report_user_hourly": os.getenv(
+            "ROUTE_REPORT_USER_HOURLY_RATE", "20/hour"
+        ),
+        "route_report_user_daily": os.getenv(
+            "ROUTE_REPORT_USER_DAILY_RATE", "25/day"
+        ),
+        "route_report_ip": os.getenv("ROUTE_REPORT_IP_RATE", "100/hour"),
+        "route_report_ip_daily": os.getenv(
+            "ROUTE_REPORT_IP_DAILY_RATE", "100/day"
+        ),
+        "route_report_global": os.getenv("ROUTE_REPORT_GLOBAL_RATE", ""),
     },
     # Caddy is the single trusted proxy in the staging Compose deployment.
     "NUM_PROXIES": 1,
@@ -123,6 +160,8 @@ ROUTE_SLOW_WARNING_MS = float(os.getenv("ROUTE_SLOW_WARNING_MS", "1500"))
 VALHALLA_ENGINE_VERSION = os.getenv("VALHALLA_ENGINE_VERSION", "")
 VALHALLA_GRAPH_BUILD_ID = os.getenv("VALHALLA_GRAPH_BUILD_ID", "")
 VALHALLA_OSM_DATA_DATE = os.getenv("VALHALLA_OSM_DATA_DATE", "")
+ROUTING_BUILD_DATE = os.getenv("ROUTING_BUILD_DATE", "")
+RALLYIFY_API_VERSION = os.getenv("RALLYIFY_API_VERSION", "beta")
 ROUTE_MAX_ENDPOINT_SNAP_METRES = float(
     os.getenv("ROUTE_MAX_ENDPOINT_SNAP_METRES", "5000")
 )
@@ -132,11 +171,22 @@ ROUTE_MAX_GEOMETRY_GAP_METRES = float(
 ROUTE_DIAGNOSTIC_RETENTION_DAYS = int(
     os.getenv("ROUTE_DIAGNOSTIC_RETENTION_DAYS", "14")
 )
-ROUTE_REPORT_RETENTION_DAYS = int(
-    os.getenv("ROUTE_REPORT_RETENTION_DAYS", "14")
+ROUTE_REPORT_EXACT_RETENTION_DAYS = int(
+    os.getenv("ROUTE_REPORT_EXACT_RETENTION_DAYS", "30")
 )
-ROUTE_REPORT_BEARER_TOKENS = [
-    token.strip()
-    for token in (ROUTE_REPORT_BEARER_TOKENS_ENV or "").split(",")
-    if token.strip()
-]
+ROUTE_REPORT_SUMMARY_RETENTION_DAYS = int(
+    os.getenv("ROUTE_REPORT_SUMMARY_RETENTION_DAYS", "90")
+)
+SUPABASE_JWT_AUDIENCE = os.getenv("SUPABASE_JWT_AUDIENCE", "authenticated").strip()
+SUPABASE_JWKS_URL = (
+    f"{SUPABASE_JWT_ISSUER}/.well-known/jwks.json" if SUPABASE_JWT_ISSUER else ""
+)
+SUPABASE_JWT_ALGORITHMS = ["ES256", "RS256"]
+SUPABASE_JWKS_CACHE_SECONDS = min(
+    max(int(os.getenv("SUPABASE_JWKS_CACHE_SECONDS", "600")), 60),
+    600,
+)
+SUPABASE_JWKS_TIMEOUT_SECONDS = int(os.getenv("SUPABASE_JWKS_TIMEOUT_SECONDS", "3"))
+SUPABASE_JWT_LEEWAY_SECONDS = int(os.getenv("SUPABASE_JWT_LEEWAY_SECONDS", "30"))
+SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "5000"))
+ROUTE_REPORT_MAX_JSON_DEPTH = int(os.getenv("ROUTE_REPORT_MAX_JSON_DEPTH", "10"))

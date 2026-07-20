@@ -14,7 +14,8 @@ def validate_protected_environment(**overrides):
         "debug": False,
         "secret_key_env": "a-real-staging-secret",
         "allowed_hosts_env": "api-dev.example.com",
-        "report_tokens_env": "a-secure-beta-report-token-that-is-long-enough",
+        "supabase_url": "https://test.supabase.co",
+        "supabase_jwt_issuer": "https://test.supabase.co/auth/v1",
     }
     values.update(overrides)
     validate_runtime_configuration(**values)
@@ -49,12 +50,27 @@ def test_missing_or_wildcard_allowed_hosts_are_rejected(allowed_hosts):
 
 
 @pytest.mark.parametrize(
-    "report_tokens",
-    [None, "", "short", "replace-with-a-long-random-beta-token"],
+    "issuer",
+    [None, "", "http://test.supabase.co/auth/v1"],
 )
-def test_missing_or_insecure_report_tokens_are_rejected(report_tokens):
-    with pytest.raises(ImproperlyConfigured, match="ROUTE_REPORT_BEARER_TOKENS"):
-        validate_protected_environment(report_tokens_env=report_tokens)
+def test_missing_or_insecure_supabase_issuer_is_rejected(issuer):
+    with pytest.raises(ImproperlyConfigured, match="SUPABASE_JWT_ISSUER"):
+        validate_protected_environment(supabase_jwt_issuer=issuer)
+
+
+def test_supabase_issuer_must_match_project_url():
+    with pytest.raises(ImproperlyConfigured, match="SUPABASE_JWT_ISSUER"):
+        validate_protected_environment(
+            supabase_jwt_issuer="https://another.supabase.co/auth/v1"
+        )
+
+
+def test_supabase_project_url_must_use_https():
+    with pytest.raises(ImproperlyConfigured, match="SUPABASE_URL"):
+        validate_protected_environment(
+            supabase_url="http://test.supabase.co",
+            supabase_jwt_issuer="http://test.supabase.co/auth/v1",
+        )
 
 
 def test_development_keeps_local_fallbacks_available():

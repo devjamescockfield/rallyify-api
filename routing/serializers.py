@@ -9,6 +9,17 @@ from routing.contracts import (
 )
 
 
+class StrictFieldsMixin:
+    def to_internal_value(self, data):
+        if isinstance(data, dict):
+            unknown = sorted(set(data) - set(self.fields))
+            if unknown:
+                raise serializers.ValidationError(
+                    {field: ["Unexpected field."] for field in unknown}
+                )
+        return super().to_internal_value(data)
+
+
 class FiniteFloatField(serializers.FloatField):
     def to_internal_value(self, data):
         value = super().to_internal_value(data)
@@ -51,7 +62,7 @@ class ValhallaPayloadSerializer(serializers.Serializer):
     directions_options = serializers.DictField()
 
 
-class ExactLocationSerializer(serializers.Serializer):
+class ExactLocationSerializer(StrictFieldsMixin, serializers.Serializer):
     latitude = FiniteFloatField(min_value=-90, max_value=90)
     longitude = FiniteFloatField(min_value=-180, max_value=180)
 
@@ -71,13 +82,13 @@ class GeometryPointSerializer(serializers.ListField):
         return [longitude, latitude]
 
 
-class CoarseRouteAreaSerializer(serializers.Serializer):
+class CoarseRouteAreaSerializer(StrictFieldsMixin, serializers.Serializer):
     latitudeBand = FiniteFloatField(min_value=-90, max_value=90)
     longitudeBand = FiniteFloatField(min_value=-180, max_value=180)
     precision = serializers.ChoiceField(choices=["0.1_degree"])
 
 
-class MobileRouteDiagnosticSerializer(serializers.Serializer):
+class MobileRouteDiagnosticSerializer(StrictFieldsMixin, serializers.Serializer):
     appVersion = serializers.CharField(max_length=50)
     buildProfile = serializers.CharField(max_length=50)
     routeProvider = serializers.CharField(max_length=50)
@@ -109,7 +120,7 @@ class MobileRouteDiagnosticSerializer(serializers.Serializer):
     coarseArea = CoarseRouteAreaSerializer(required=False)
 
 
-class ConsentedManeuverSerializer(serializers.Serializer):
+class ConsentedManeuverSerializer(StrictFieldsMixin, serializers.Serializer):
     instruction = serializers.CharField(max_length=500)
     type = serializers.CharField(max_length=50)
     bearingAfter = FiniteFloatField(min_value=0, max_value=360)
@@ -121,7 +132,7 @@ class ConsentedManeuverSerializer(serializers.Serializer):
     )
 
 
-class ConsentedRouteDetailsSerializer(serializers.Serializer):
+class ConsentedRouteDetailsSerializer(StrictFieldsMixin, serializers.Serializer):
     routeGeometry = serializers.ListField(
         child=GeometryPointSerializer(),
         min_length=2,
@@ -133,7 +144,7 @@ class ConsentedRouteDetailsSerializer(serializers.Serializer):
     currentManeuver = ConsentedManeuverSerializer(required=False)
 
 
-class MobileRouteIssueReportSerializer(serializers.Serializer):
+class MobileRouteIssueReportSerializer(StrictFieldsMixin, serializers.Serializer):
     id = serializers.CharField(max_length=100)
     dedupeKey = serializers.CharField(max_length=100)
     category = serializers.ChoiceField(
@@ -147,7 +158,7 @@ class MobileRouteIssueReportSerializer(serializers.Serializer):
             "other",
         ]
     )
-    description = serializers.CharField(max_length=2000, required=False, allow_blank=True)
+    description = serializers.CharField(max_length=500, required=False, allow_blank=True)
     roadName = serializers.CharField(max_length=120, required=False, allow_blank=True)
     instructedDirection = serializers.CharField(
         max_length=240,
@@ -199,7 +210,7 @@ MOBILE_CATEGORY_MAPPING = {
 }
 
 
-class RouteIssueReportSerializer(serializers.Serializer):
+class RouteIssueReportSerializer(StrictFieldsMixin, serializers.Serializer):
     routeRequestId = serializers.CharField(
         max_length=100,
         required=False,
@@ -222,7 +233,7 @@ class RouteIssueReportSerializer(serializers.Serializer):
         required=False,
         allow_null=True,
     )
-    notes = serializers.CharField(max_length=2000, required=False, allow_blank=True)
+    notes = serializers.CharField(max_length=500, required=False, allow_blank=True)
     incidentTime = serializers.DateTimeField()
     locationConsent = serializers.BooleanField()
     exactLocation = ExactLocationSerializer(required=False)
@@ -254,6 +265,12 @@ class RouteIssueReportSerializer(serializers.Serializer):
     )
 
     def to_internal_value(self, data):
+        if isinstance(data, dict):
+            data = {
+                key: value
+                for key, value in data.items()
+                if key not in {"userId", "user_id"}
+            }
         if isinstance(data, dict) and "diagnostics" in data:
             mobile = MobileRouteIssueReportSerializer(data=data)
             mobile.is_valid(raise_exception=True)
@@ -295,10 +312,6 @@ class RouteIssueReportSerializer(serializers.Serializer):
         return {key: value for key, value in adapted.items() if value is not None}
 
     def validate(self, attrs):
-        if "userId" in self.initial_data or "user_id" in self.initial_data:
-            raise serializers.ValidationError(
-                {"userId": "Client-supplied user identifiers are not accepted."}
-            )
         exact_fields = (
             "exactLocation",
             "start",
