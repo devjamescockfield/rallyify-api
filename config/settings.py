@@ -142,6 +142,15 @@ REST_FRAMEWORK = {
             "ROUTE_REPORT_IP_DAILY_RATE", "100/day"
         ),
         "route_report_global": os.getenv("ROUTE_REPORT_GLOBAL_RATE", ""),
+        "user_data_user_burst": os.getenv(
+            "USER_DATA_USER_BURST_RATE",
+            "60/minute",
+        ),
+        "user_data_user_daily": os.getenv(
+            "USER_DATA_USER_DAILY_RATE",
+            "1000/day",
+        ),
+        "user_data_ip": os.getenv("USER_DATA_IP_RATE", "2000/day"),
     },
     # Caddy is the single trusted proxy in the staging Compose deployment.
     "NUM_PROXIES": 1,
@@ -190,3 +199,8 @@ SUPABASE_JWKS_TIMEOUT_SECONDS = int(os.getenv("SUPABASE_JWKS_TIMEOUT_SECONDS", "
 SUPABASE_JWT_LEEWAY_SECONDS = int(os.getenv("SUPABASE_JWT_LEEWAY_SECONDS", "30"))
 SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "5000"))
 ROUTE_REPORT_MAX_JSON_DEPTH = int(os.getenv("ROUTE_REPORT_MAX_JSON_DEPTH", "10"))
+USER_DATA_MAX_VEHICLES = int(os.getenv("USER_DATA_MAX_VEHICLES", "20"))
+DRIVE_HISTORY_DEFAULT_PAGE_SIZE = int(
+    os.getenv("DRIVE_HISTORY_DEFAULT_PAGE_SIZE", "25")
+)
+DRIVE_HISTORY_MAX_PAGE_SIZE = int(os.getenv("DRIVE_HISTORY_MAX_PAGE_SIZE", "100"))

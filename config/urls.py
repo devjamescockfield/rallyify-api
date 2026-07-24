@@ -17,4 +17,5 @@ urlpatterns = [
     path("routing/info", routing_information, name="routing-information"),
     path("route-reports", submit_route_report, name="mobile-route-report"),
     path("routes/", include("routing.urls")),
+    path("v1/", include("routing.v1_urls")),
 ]

@@ -65,6 +65,12 @@ to start until both values are replaced.
 | `ROUTE_REPORT_IP_RATE` | `100/hour` | Secondary per-client-IP report limit. |
 | `ROUTE_REPORT_IP_DAILY_RATE` | `100/day` | Per-client-IP report daily limit. |
 | `ROUTE_REPORT_GLOBAL_RATE` | disabled | Optional global report safety limit. |
+| `USER_DATA_USER_BURST_RATE` | `60/minute` | Per-user burst limit for authenticated `/v1` vehicle and drive APIs. |
+| `USER_DATA_USER_DAILY_RATE` | `1000/day` | Per-user daily limit for authenticated `/v1` APIs. |
+| `USER_DATA_IP_RATE` | `2000/day` | Secondary per-IP limit for authenticated `/v1` APIs. |
+| `USER_DATA_MAX_VEHICLES` | `20` | Maximum vehicle profiles per authenticated user. |
+| `DRIVE_HISTORY_DEFAULT_PAGE_SIZE` | `25` | Default completed-drive history page size. |
+| `DRIVE_HISTORY_MAX_PAGE_SIZE` | `100` | Maximum caller-selectable drive history page size. |
 | `ROUTE_DIAGNOSTIC_RETENTION_DAYS` | `14` | Retention for restricted route diagnostics. |
 | `ROUTE_REPORT_EXACT_RETENTION_DAYS` | `30` | Retention for explicitly consented exact route details, except active investigations. |
 | `ROUTE_REPORT_SUMMARY_RETENTION_DAYS` | `90` | Retention for report summaries. |
@@ -666,6 +672,126 @@ timeout by default. Report creation keeps only the individual insert inside a
 transaction. This is appropriate for the controlled beta load, but migrate
 report/diagnostic storage to PostgreSQL before a wider external beta or any
 multi-VM deployment.
+
+## Vehicle And Drive Sync API
+
+The `/v1` API synchronises vehicle profiles and completed-drive summaries. All
+endpoints require the same verified Supabase user access token used by route
+reports:
+
+```http
+Authorization: Bearer <supabase-access-token>
+Content-Type: application/json
+```
+
+Ownership always comes from the verified JWT `sub`. Request fields such as
+`ownerId` or `userId` are rejected as unexpected fields; a client UUID alone
+does not establish ownership.
+
+### Endpoints
+
+- `GET|POST /v1/vehicles`
+- `GET|PATCH|DELETE /v1/vehicles/{id}`
+- `POST /v1/vehicles/{id}/set-default`
+- `GET|POST /v1/drives`
+- `GET|PATCH|DELETE /v1/drives/{id}`
+- `PUT|DELETE /v1/drives/{id}/fuel`
+
+Vehicle responses use camel-case JSON and include `id`, `displayName`,
+optional make/model/year/registration, fuel and category values, capacities,
+one optional economy baseline, `isDefault`, timestamps, and `schemaVersion`.
+At most one vehicle can be default for an owner. Deleting a vehicle sets its
+drive/fuel references to null while retaining the historical vehicle-name
+snapshots.
+
+Create a completed-drive summary:
+
+```json
+{
+  "completionId": "019c-drive-completion-1",
+  "vehicleId": "36a4d365-7a77-41ba-8657-a09f6ee5e767",
+  "routeTitleSnapshot": "NC500 day one",
+  "routeId": "saved-route-123",
+  "mode": "group",
+  "groupId": "group-123",
+  "startedAt": "2026-07-24T08:00:00Z",
+  "finishedAt": "2026-07-24T10:00:00Z",
+  "elapsedSeconds": 7200,
+  "movingSeconds": 6300,
+  "stoppedSeconds": 900,
+  "actualDistanceMetres": 100000,
+  "plannedDistanceMetres": 98000,
+  "completionReason": "arrived",
+  "rerouteCount": 1,
+  "offRouteCount": 2
+}
+```
+
+`averageOverallSpeedMps` and `averageMovingSpeedMps` are calculated and stored
+by the API from canonical distance/time inputs. No GPS trace, start
+coordinate, destination coordinate, or live tracking sample is accepted or
+stored. History is ordered by completion time and paginated with `page` and
+`pageSize`; page size defaults to 25 and is capped at 100.
+
+`completionId` is unique per authenticated owner. A retry with identical
+canonical content returns the existing drive with `200` and
+`duplicate: true`. Reusing it with different content returns
+`409 COMPLETION_ID_REUSED`. Different users can independently use the same
+completion ID.
+
+Fuel details are optional and are attached one-to-one to a completed drive.
+`PUT` creates or replaces that drive's fuel details; it never creates another
+drive. Supported methods are `fuel_used_entry`, `fill_to_fill`,
+`fuel_level_estimate`, and `vehicle_profile_estimate`. `obd_measured` is
+reserved in storage for future compatibility but is rejected by the API;
+there is no OBD, Bluetooth, or telemetry ingestion.
+
+UK MPG is calculated as:
+
+```text
+distance_miles / (fuel_litres / 4.54609)
+```
+
+Metric economy is `(fuel_litres / distance_kilometres) * 100`. Canonical
+values are retained to four decimal places while display values are returned
+to one decimal place. Fuel-level and profile calculations are always labelled
+`estimated`. Profile estimate model `vehicle-profile-v1` uses only an
+explicit vehicle baseline, applies modest speed/stopped-time penalties, and
+bounds its consumption adjustment to `0.85x-1.25x`. It returns no estimate
+when a baseline is absent.
+
+### Limits And Privacy
+
+Vehicle names are limited to 100 characters, make/model to 80, registration
+to 32, and route titles to 200. Years must be between 1886 and next year.
+Tank/battery capacity is capped at 300, distance at 10,000 km, duration at 31
+days, calculated average speed at 100 m/s, and fuel at 1,000 litres. The
+existing 64 KiB body limit and strict unknown-field validation apply.
+
+Registration, fuel values, and personal identifiers are not written to
+application logs. Admin list pages omit registration, and completion IDs are
+read-only. Deleting drive history also deletes its fuel details. A future
+account-deletion workflow must remove all `VehicleProfile`, `CompletedDrive`,
+and `FuelEconomyRecord` rows for the verified Supabase subject.
+
+The current Django database is separate from Supabase. Migration
+`routing/migrations/0003_completeddrive_vehicleprofile_fueleconomyrecord_and_more.py`
+applies only to the hosted Rallyify API database; no Supabase SQL or policy
+change is involved.
+
+Back up the API database and deploy the migration with:
+
+```bash
+docker compose exec -T rallyify-api python manage.py migrate --noinput
+```
+
+The container also runs migrations before Gunicorn starts. Creating the
+migration in this repository does not mean it has been deployed. SQLite WAL
+mode and a busy timeout are suitable for the controlled single-VM beta, but
+move user-owned vehicle/history data to PostgreSQL before wider external
+testing, multi-VM deployment, or materially higher write concurrency. The
+default throttle cache is per Gunicorn process; use a shared Redis cache when
+quotas need to be exact across workers.
 
 ### `GET /routing/info`
 

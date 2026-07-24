@@ -47,3 +47,21 @@ class RouteReportGlobalThrottle(SimpleRateThrottle):
 
     def get_cache_key(self, request, view):
         return self.cache_format % {"scope": self.scope, "ident": "all"}
+
+
+class UserDataUserBurstThrottle(UserRateThrottle):
+    scope = "user_data_user_burst"
+
+
+class UserDataUserDailyThrottle(UserRateThrottle):
+    scope = "user_data_user_daily"
+
+
+class UserDataIPThrottle(AnonRateThrottle):
+    scope = "user_data_ip"
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {
+            "scope": self.scope,
+            "ident": self.get_ident(request),
+        }
