@@ -97,8 +97,8 @@ services:
     container_name: rallyify-valhalla
     restart: unless-stopped
     logging: *default-logging
-    # Internal-only: do not add a ports: mapping for 8002 in staging.
-    # The API reaches this service through http://valhalla:8002.
+    environment:
+      server_threads: "3"
     expose:
       - "8002"
     healthcheck:
@@ -110,7 +110,6 @@ services:
       retries: 10
       start_period: 30m
     volumes:
-      # Put united-kingdom-latest.osm.pbf and generated Valhalla files here.
       - /data/valhalla/custom_files:/custom_files
 
 volumes:
