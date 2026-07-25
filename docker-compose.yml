@@ -110,7 +110,7 @@ services:
       retries: 10
       start_period: 30m
     volumes:
-      - /data/valhalla/custom_files:/custom_files
+      - /srv/data/valhalla/custom_files:/custom_files
 
 volumes:
   caddy_data:
