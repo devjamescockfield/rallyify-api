@@ -793,6 +793,13 @@ testing, multi-VM deployment, or materially higher write concurrency. The
 default throttle cache is per Gunicorn process; use a shared Redis cache when
 quotas need to be exact across workers.
 
+## Offline PMTiles Proof Of Concept
+
+Caddy statically hosts the versioned Northern Highlands/NC500 PMTiles package
+under `/offline-maps`; Django does not serve or proxy the archive. Generation,
+licensing, deployment, rollback, manifest and HTTP range-test instructions are
+in [docs/pmtiles-poc.md](docs/pmtiles-poc.md).
+
 ### `GET /routing/info`
 
 Returns safe provider, graph/data/build identifiers and supported profile and

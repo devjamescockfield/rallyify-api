@@ -1,0 +1,9 @@
+{
+  "attribution": "© OpenMapTiles © OpenStreetMap contributors",
+  "displayRequired": true,
+  "dataLicense": "Open Database License (ODbL) 1.0",
+  "dataLicenseUrl": "https://www.openstreetmap.org/copyright",
+  "schemaLicenseUrl": "https://github.com/openmaptiles/openmaptiles/blob/master/LICENSE.md",
+  "source": "Geofabrik Scotland OpenStreetMap extract",
+  "sourceUrl": "https://download.geofabrik.de/europe/united-kingdom/scotland.html"
+}

@@ -1,3 +1,31 @@
 api-dev.example.com {
-    reverse_proxy rallyify-api:8000
+	route {
+		header /offline-maps/* {
+			Access-Control-Allow-Origin "*"
+			Access-Control-Allow-Methods "GET, HEAD, OPTIONS"
+			Access-Control-Allow-Headers "Range, If-Range, If-Match, If-None-Match"
+			Access-Control-Expose-Headers "Accept-Ranges, Content-Length, Content-Range, ETag, Last-Modified"
+			Accept-Ranges "bytes"
+		}
+
+		@offline_options {
+			method OPTIONS
+			path /offline-maps/*
+		}
+		respond @offline_options 204
+
+		header /offline-maps/packages/* {
+			Cache-Control "public, max-age=31536000, immutable"
+		}
+		header /offline-maps/packages/*.pmtiles Content-Type "application/vnd.pmtiles"
+		header /offline-maps/manifest.json Cache-Control "no-cache"
+		header /offline-maps/attribution.json Cache-Control "public, max-age=3600"
+
+		handle_path /offline-maps/* {
+			root * /srv/offline-maps
+			file_server
+		}
+
+		reverse_proxy rallyify-api:8000
+	}
 }

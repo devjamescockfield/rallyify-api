@@ -1,0 +1,19 @@
+{
+  "type": "Feature",
+  "properties": {
+    "id": "uk-scotland-northern-highlands",
+    "version": "2026-07-01"
+  },
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [-6.22, 57.2],
+        [-2.65, 57.2],
+        [-2.65, 58.87],
+        [-6.22, 58.87],
+        [-6.22, 57.2]
+      ]
+    ]
+  }
+}

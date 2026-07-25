@@ -1,0 +1,19 @@
+{
+  "type": "Feature",
+  "properties": {
+    "id": "uk-scotland-northern-highlands",
+    "description": "Northern Highlands and NC500 proof-of-concept envelope with approximately 20-30 km overlap."
+  },
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [-6.22, 57.2],
+        [-2.65, 57.2],
+        [-2.65, 58.87],
+        [-6.22, 58.87],
+        [-6.22, 57.2]
+      ]
+    ]
+  }
+}

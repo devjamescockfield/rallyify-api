@@ -1,0 +1,24 @@
+{
+  "packages": [
+    {
+      "id": "uk-scotland-northern-highlands",
+      "version": "2026-07-01",
+      "url": "https://api-dev.example.com/offline-maps/packages/uk-scotland-northern-highlands-2026-07-01.pmtiles",
+      "sizeBytes": 51806701,
+      "sha256": "c3be42243cfeb283523b2ea1a0ce2767875509f129333a7d713b9529a955bcf0",
+      "sha256Url": "https://api-dev.example.com/offline-maps/packages/uk-scotland-northern-highlands-2026-07-01.pmtiles.sha256",
+      "bounds": [-6.22, 57.2, -2.65, 58.87],
+      "boundaryUrl": "https://api-dev.example.com/offline-maps/bounds/uk-scotland-northern-highlands.geojson",
+      "minZoom": 0,
+      "maxZoom": 14,
+      "sourceDataDate": "2026-07-01",
+      "sourceDataTimestamp": "2026-07-01T20:22:00Z",
+      "generatedAt": "2026-07-24T21:54:00Z",
+      "tileSchema": "OpenMapTiles",
+      "tileSchemaVersion": "3.16.0",
+      "styleVersion": "rallyify-offline-v1",
+      "attribution": "© OpenMapTiles © OpenStreetMap contributors",
+      "licenseUrl": "https://www.openstreetmap.org/copyright"
+    }
+  ]
+}

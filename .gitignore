@@ -15,6 +15,10 @@ db.sqlite3
 media/
 staticfiles/
 
+# Generated offline-map inputs, tools, and binary packages
+maps/work/
+maps/public/packages/*.pmtiles
+
 # Env
 .env
 .env.local
